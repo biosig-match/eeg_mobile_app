@@ -1,77 +1,48 @@
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
-import '../providers/ble_provider.dart';
+import '../models/sensor_data.dart';
 
-// ★★★ マルチチャンネルチャートを新設 ★★★
 class EegMultiChannelChart extends StatelessWidget {
   final List<SensorDataPoint> data;
   final int channelCount;
 
-  const EegMultiChannelChart({
-    super.key,
-    required this.data,
-    required this.channelCount,
-  });
+  const EegMultiChannelChart(
+      {super.key, required this.data, this.channelCount = 8});
 
   @override
   Widget build(BuildContext context) {
-    if (data.isEmpty) {
-      return const Center(child: Text("Connecting to device..."));
-    }
-    // ListView.builderを使うことで、チャンネル数が増えても描画できる
-    return ListView.builder(
-      itemCount: channelCount,
-      itemBuilder: (context, index) {
-        return EegSingleChannelChart(channelIndex: index);
-      },
-    );
-  }
-}
-
-// ★★★ シングルチャンネルチャートを簡略化 ★★★
-class EegSingleChannelChart extends StatelessWidget {
-  final int channelIndex;
-
-  const EegSingleChannelChart({super.key, required this.channelIndex});
-
-  @override
-  Widget build(BuildContext context) {
-    // Providerをwatchして、データが更新されるたびに再描画する
-    final bleProvider = context.watch<BleProvider>();
-    final dataPoints = bleProvider.displayData;
-
-    if (dataPoints.isEmpty || dataPoints.first.eegValues.length <= channelIndex) {
-      return const SizedBox(height: 50); // 空のSizedBox
-    }
-
-    final List<FlSpot> spots = [];
-    for (int i = 0; i < dataPoints.length; i++) {
-      spots.add(FlSpot(i.toDouble(), dataPoints[i].eegValues[channelIndex].toDouble()));
-    }
-
-    return AspectRatio(
-      aspectRatio: 6, // 縦幅を狭くする
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 4.0, horizontal: 8.0),
-        child: LineChart(
-          LineChartData(
-            minY: bleProvider.displayYMin,
-            maxY: bleProvider.displayYMax,
-            lineBarsData: [
-              LineChartBarData(
-                spots: spots,
-                isCurved: false,
-                color: Colors.cyan,
-                barWidth: 1.5,
-                dotData: const FlDotData(show: false),
-              ),
-            ],
-            titlesData: const FlTitlesData(show: false), // タイトルは非表示
-            gridData: const FlGridData(show: false),
-            borderData: FlBorderData(show: false),
-          ),
+    return LineChart(
+      LineChartData(
+        lineBarsData: List.generate(channelCount, (channelIndex) {
+          final double verticalOffset =
+              (channelCount - 1 - channelIndex) * 500.0;
+          return LineChartBarData(
+            spots: data.asMap().entries.map((entry) {
+              final index = entry.key;
+              final point = entry.value;
+              return FlSpot(
+                  index.toDouble(),
+                  point.eegValues[channelIndex].toDouble() -
+                      2048 +
+                      verticalOffset);
+            }).toList(),
+            isCurved: false,
+            color: Colors.cyanAccent,
+            barWidth: 1.5,
+            dotData: const FlDotData(show: false),
+          );
+        }),
+        gridData: const FlGridData(show: false),
+        titlesData: const FlTitlesData(
+          leftTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)),
+          topTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)),
+          bottomTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)),
+          rightTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)),
         ),
+        borderData: FlBorderData(
+            show: true, border: Border.all(color: Colors.grey[800]!)),
+        minY: -500,
+        maxY: (channelCount) * 500,
       ),
     );
   }

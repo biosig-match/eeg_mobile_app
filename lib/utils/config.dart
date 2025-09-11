@@ -1,9 +1,9 @@
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:flutter/foundation.dart';
 
+// .envファイルをロードするためのクラス
 class ConfigLoader {
   static Future<Map<String, String>> loadEnv({String fileName = '.env'}) async {
-    // (この部分は変更なし)
     try {
       final content = await rootBundle.loadString(fileName);
       final map = <String, String>{};
@@ -19,12 +19,13 @@ class ConfigLoader {
       return map;
     } catch (e) {
       throw FlutterError(
-        "Failed to load .env. Ensure 'mobile_app/.env' exists and is listed under assets in pubspec.yaml. Original error: $e",
+        "Failed to load .env. Ensure '.env' exists and is listed under assets in pubspec.yaml. Original error: $e",
       );
     }
   }
 }
 
+// サーバー設定を保持するクラス
 class ServerConfig {
   final String protocol;
   final String ip;
@@ -32,21 +33,19 @@ class ServerConfig {
 
   ServerConfig({required this.protocol, required this.ip, required this.port});
 
-  // ★★★ ここから修正しました ★★★
   String get httpBaseUrl => '$protocol://$ip:$port';
-  
+
   String get wsBaseUrl {
     final wsProtocol = protocol == 'https' ? 'wss' : 'ws';
     return '$wsProtocol://$ip:$port';
   }
-  // ★★★ 修正はここまで ★★★
 
   factory ServerConfig.fromEnv(Map<String, String> env) {
-    // (この部分は変更なし)
     final errors = <String>[];
     final protocol = env['SERVER_PROTOCOL'];
     if (protocol == null || protocol.isEmpty) {
-      errors.add("Missing SERVER_PROTOCOL (expected 'http' or 'https' in .env)");
+      errors
+          .add("Missing SERVER_PROTOCOL (expected 'http' or 'https' in .env)");
     }
     final ip = env['SERVER_IP'];
     if (ip == null || ip.isEmpty) {
@@ -63,7 +62,8 @@ class ServerConfig {
       }
     }
     if (errors.isNotEmpty) {
-      throw FlutterError("Invalid .env configuration:\n - ${errors.join("\n - ")}");
+      throw FlutterError(
+          "Invalid .env configuration:\n - ${errors.join("\n - ")}");
     }
     return ServerConfig(
       protocol: protocol!.toLowerCase(),

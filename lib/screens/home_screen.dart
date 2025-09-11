@@ -1,129 +1,147 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:permission_handler/permission_handler.dart';
-import '../../providers/ble_provider.dart';
-import '../../providers/analysis_provider.dart';
-import '../../providers/experiment_provider.dart';
-import '../../widgets/eeg_chart.dart';
-import '../../widgets/analysis_widgets.dart';
+
+import '../models/session.dart';
+import '../providers/ble_provider.dart';
+import '../providers/session_provider.dart';
+import '../widgets/app_drawer.dart';
+import '../widgets/eeg_chart.dart';
+import '../widgets/valence_chart.dart';
+import 'experiments_screen.dart';
+import 'session_summary_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
+
   @override
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  final TextEditingController _participantIdController = TextEditingController(text: "sub-01");
-
   @override
   void initState() {
     super.initState();
-    // 権限をリクエスト
-    [Permission.bluetoothScan, Permission.bluetoothConnect, Permission.location].request();
-  }
-  
-  @override
-  void dispose() {
-    _participantIdController.dispose();
-    super.dispose();
+    [
+      Permission.bluetoothScan,
+      Permission.bluetoothConnect,
+      Permission.location,
+      Permission.camera,
+      Permission.microphone,
+    ].request();
   }
 
-  void _showParticipantIdDialog(BuildContext context) {
+  void _showSessionTypeDialog() {
+    // ★★★ Providerの取得をダイアログ表示前に行う ★★★
+    final sessionProvider = context.read<SessionProvider>();
     final bleProvider = context.read<BleProvider>();
-    final experimentProvider = context.read<ExperimentProvider>();
+    final connectedDeviceId = bleProvider.connectedDeviceId;
+
+    // デバイスIDが取得できていない場合はセッションを開始しない
+    if (connectedDeviceId == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("デバイスIDが不明です。再接続してください。")),
+      );
+      return;
+    }
 
     showDialog(
       context: context,
-      builder: (context) {
-        return AlertDialog(
-          title: const Text("実験を開始"),
-          content: TextField(
-            controller: _participantIdController,
-            decoration: const InputDecoration(labelText: "参加者ID"),
+      builder: (ctx) => AlertDialog(
+        title: const Text("セッション種別を選択"),
+        content: const Text("このセッションはキャリブレーションですか、本計測ですか？"),
+        actions: [
+          TextButton(
+            child: const Text("キャリブレーション"),
+            onPressed: () {
+              // ★★★ deviceIdを渡す ★★★
+              sessionProvider.startSession(
+                type: SessionType.calibration,
+                deviceId: connectedDeviceId,
+              );
+              Navigator.of(ctx).pop();
+            },
           ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text("キャンセル"),
-            ),
-            FilledButton(
-              onPressed: () {
-                if (_participantIdController.text.isNotEmpty && bleProvider.connectedDeviceId != null) {
-                  experimentProvider.startExperiment(
-                    participantId: _participantIdController.text,
-                    deviceId: bleProvider.connectedDeviceId!,
-                  );
-                  Navigator.of(context).pop();
-                }
-              },
-              child: const Text("開始"),
-            ),
-          ],
-        );
-      },
+          FilledButton(
+            child: const Text("本計測"),
+            onPressed: () {
+              // ★★★ deviceIdを渡す ★★★
+              sessionProvider.startSession(
+                type: SessionType.main,
+                deviceId: connectedDeviceId,
+              );
+              Navigator.of(ctx).pop();
+            },
+          ),
+        ],
+      ),
     );
   }
 
   @override
   Widget build(BuildContext context) {
     final bleProvider = context.watch<BleProvider>();
-    final analysisProvider = context.watch<AnalysisProvider>();
-    final experimentProvider = context.watch<ExperimentProvider>();
+    final sessionProvider = context.watch<SessionProvider>();
+    final theme = Theme.of(context);
 
     return Scaffold(
-      appBar: AppBar(title: const Text('EEG BIDS Collector')),
+      appBar: AppBar(
+        title: const Text('EEG BIDS Collector'),
+        actions: [
+          Padding(
+            padding: const EdgeInsets.only(right: 8.0),
+            child: Icon(
+              bleProvider.isConnected
+                  ? Icons.bluetooth_connected
+                  : Icons.bluetooth_disabled,
+              color: bleProvider.isConnected ? Colors.cyanAccent : Colors.grey,
+            ),
+          )
+        ],
+      ),
+      drawer: const AppDrawer(),
       body: Padding(
         padding: const EdgeInsets.all(8.0),
         child: Column(
           children: [
-            // ステータス表示
             Card(
               child: ListTile(
-                leading: Icon(bleProvider.isConnected ? Icons.bluetooth_connected : Icons.bluetooth_disabled),
-                title: Text(bleProvider.statusMessage),
-                subtitle: Text(experimentProvider.statusMessage),
-                trailing: Text(bleProvider.connectedDeviceId ?? "Device ID: ---"),
-              ),
-            ),
-            // 脳波チャート
-            Expanded(
-              flex: 2,
-              child: EegMultiChannelChart(
-                data: bleProvider.displayData,
-                channelCount: 8,
-              ),
-            ),
-            // 解析結果タブ
-            Expanded(
-              flex: 1,
-              child: DefaultTabController(
-                length: 2,
-                child: Column(
-                  children: [
-                    const TabBar(tabs: [Tab(text: "PSD"), Tab(text: "Coherence")]),
-                    Expanded(
-                      child: TabBarView(
-                        children: [
-                          AnalysisImageViewer(imageProvider: () => analysisProvider.latestAnalysis?.psdImage),
-                          AnalysisImageViewer(imageProvider: () => analysisProvider.latestAnalysis?.coherenceImage),
-                        ],
-                      ),
-                    ),
-                  ],
+                leading: const Icon(Icons.science_outlined),
+                title: Text(
+                    sessionProvider.selectedExperiment?.name ?? "実験が選択されていません"),
+                subtitle: Text(sessionProvider.statusMessage,
+                    style: TextStyle(color: theme.colorScheme.primary)),
+                trailing: TextButton(
+                  child: const Text("変更"),
+                  onPressed: () {
+                    Navigator.of(context).push(MaterialPageRoute(
+                        builder: (_) => const ExperimentsScreen()));
+                  },
                 ),
               ),
+            ),
+            const SizedBox(height: 8),
+            Expanded(
+              flex: 3,
+              child: EegMultiChannelChart(data: bleProvider.displayData),
+            ),
+            const SizedBox(height: 8),
+            Expanded(
+              flex: 2,
+              child: ValenceChart(data: bleProvider.valenceHistory),
             ),
           ],
         ),
       ),
-      // フローティングアクションボタン
-      floatingActionButton: _buildActionButton(context, bleProvider, experimentProvider, analysisProvider),
       floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
+      floatingActionButton:
+          _buildActionButton(context, bleProvider, sessionProvider),
     );
   }
 
-  Widget _buildActionButton(BuildContext context, BleProvider ble, ExperimentProvider exp, AnalysisProvider ana) {
+  Widget _buildActionButton(
+      BuildContext context, BleProvider ble, SessionProvider session) {
+    // ... (このウィジェットビルドメソッドに変更はなし)
     if (!ble.isConnected) {
       return FloatingActionButton.extended(
         onPressed: ble.startScan,
@@ -131,11 +149,15 @@ class _HomeScreenState extends State<HomeScreen> {
         icon: const Icon(Icons.search),
       );
     }
-    
-    if (exp.isRunning) {
+
+    if (session.isSessionRunning) {
       return FloatingActionButton.extended(
-        onPressed: exp.stopAndUploadEvents,
-        label: const Text("実験を終了 & CSVをアップロード"),
+        onPressed: () {
+          Navigator.of(context).pushReplacement(
+            MaterialPageRoute(builder: (_) => const SessionSummaryScreen()),
+          );
+        },
+        label: const Text("セッション終了"),
         icon: const Icon(Icons.stop),
         backgroundColor: Colors.red,
       );
@@ -145,21 +167,20 @@ class _HomeScreenState extends State<HomeScreen> {
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
         FloatingActionButton.extended(
-          onPressed: () => _showParticipantIdDialog(context),
-          label: const Text("実験を開始"),
+          onPressed:
+              session.isExperimentSelected ? _showSessionTypeDialog : null,
+          label: const Text("セッション開始"),
           icon: const Icon(Icons.play_arrow),
-          backgroundColor: Colors.green,
+          backgroundColor:
+              session.isExperimentSelected ? Colors.green : Colors.grey,
         ),
         const SizedBox(width: 16),
-        FloatingActionButton.extended(
-          onPressed: () {
-            ble.disconnect();
-            ana.stopPolling();
-          },
-          label: const Text("切断"),
-          icon: const Icon(Icons.link_off),
-          backgroundColor: Colors.grey,
-        )
+        FloatingActionButton(
+          onPressed: ble.disconnect,
+          backgroundColor: Colors.grey[800],
+          child: const Icon(Icons.link_off),
+          heroTag: 'disconnect_button',
+        ),
       ],
     );
   }
