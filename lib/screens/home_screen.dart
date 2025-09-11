@@ -123,25 +123,33 @@ class _HomeScreenState extends State<HomeScreen> {
             const SizedBox(height: 8),
             Expanded(
               flex: 3,
-              child: EegMultiChannelChart(data: bleProvider.displayData),
+              child: EegMultiChannelChart(
+                data: bleProvider.displayData,
+                sampleRate: BleProvider.sampleRate,
+              ),
             ),
             const SizedBox(height: 8),
+            // ★★★ 快不快チャートのflex比率を調整 ★★★
             Expanded(
               flex: 2,
               child: ValenceChart(data: bleProvider.valenceHistory),
             ),
+            // ★★★ ボタンをColumn内に移動 ★★★
+            const SizedBox(height: 16),
+            _buildActionButton(context, bleProvider, sessionProvider),
+            const SizedBox(height: 8), // 下部に少し余白を追加
           ],
         ),
       ),
-      floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
-      floatingActionButton:
-          _buildActionButton(context, bleProvider, sessionProvider),
+      // ★★★ FloatingActionButtonを削除 ★★★
+      // floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
+      // floatingActionButton:
+      //     _buildActionButton(context, bleProvider, sessionProvider),
     );
   }
 
   Widget _buildActionButton(
       BuildContext context, BleProvider ble, SessionProvider session) {
-    // ... (このウィジェットビルドメソッドに変更はなし)
     if (!ble.isConnected) {
       return FloatingActionButton.extended(
         onPressed: ble.startScan,
