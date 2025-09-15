@@ -62,17 +62,20 @@ class BleProvider with ChangeNotifier {
   final List<SensorDataPoint> _dataBuffer = [];
   final List<(DateTime, double)> _valenceHistory = [];
 
-  // ★★★★★ 変更点(1): UI更新を間引くためのフラグとタイマーを追加 ★★★★★
   bool _needsUiUpdate = false;
   Timer? _uiUpdateTimer;
+
+  // ★★★★★ 時刻同期機能のための新しいプロパティ ★★★★★
+  Timer? _timeSyncTimer;
+  String _timeSyncStatus = "時刻未同期";
 
   bool get isConnected => _isConnected;
   String get statusMessage => _statusMessage;
   List<SensorDataPoint> get displayData => _dataBuffer;
   List<(DateTime, double)> get valenceHistory => _valenceHistory;
+  String get timeSyncStatus => _timeSyncStatus; // UI表示用にゲッターを追加
 
   BleProvider(this._config, this._authProvider) {
-    // 16ミリ秒ごと（約60fps）にUI更新をチェックするタイマーを設定
     _uiUpdateTimer = Timer.periodic(const Duration(milliseconds: 16), (timer) {
       if (_needsUiUpdate) {
         notifyListeners();
@@ -83,10 +86,12 @@ class BleProvider with ChangeNotifier {
 
   @override
   void dispose() {
-    _uiUpdateTimer?.cancel(); // Providerが破棄されるときにタイマーもキャンセル
+    _uiUpdateTimer?.cancel();
+    _timeSyncTimer?.cancel(); // タイマーをキャンセル
     super.dispose();
   }
 
+  // (startScan, _connectToDeviceは変更なし)
   void startScan() {
     _updateStatus("デバイスをスキャン中...");
     FlutterBluePlus.startScan(timeout: const Duration(seconds: 5));
@@ -118,7 +123,6 @@ class BleProvider with ChangeNotifier {
     try {
       await device.connect(timeout: const Duration(seconds: 15));
       debugPrint("[BLE] ✅ Connect method successful.");
-
       _isConnected = true;
       notifyListeners();
 
@@ -142,7 +146,6 @@ class BleProvider with ChangeNotifier {
 
   Future<void> _setupServices(BluetoothDevice device) async {
     try {
-      debugPrint("[BLE] Starting service discovery...");
       final services = await device.discoverServices();
       bool txFound = false;
       bool rxFound = false;
@@ -150,19 +153,18 @@ class BleProvider with ChangeNotifier {
       for (var service in services) {
         if (service.uuid.toString().toUpperCase() ==
             "6E400001-B5A3-F393-E0A9-E50E24DCCA9E") {
-          debugPrint("[BLE] ✅ Target Service found.");
           for (var char in service.characteristics) {
             if (char.uuid.toString().toUpperCase() ==
                 "6E400003-B5A3-F393-E0A9-E50E24DCCA9E") {
               await char.setNotifyValue(true);
-              _valueSubscription = char.lastValueStream.listen(_onDataReceived);
+              // ★★★★★ 受信データのディスパッチャをリスナーに設定 ★★★★★
+              _valueSubscription =
+                  char.lastValueStream.listen(_onDataDispatcher);
               txFound = true;
-              debugPrint("[BLE]   ✅ TX Characteristic subscribed.");
             } else if (char.uuid.toString().toUpperCase() ==
                 "6E400002-B5A3-F393-E0A9-E50E24DCCA9E") {
               _rxCharacteristic = char;
               rxFound = true;
-              debugPrint("[BLE]   ✅ RX Characteristic found and assigned.");
             }
           }
         }
@@ -170,33 +172,37 @@ class BleProvider with ChangeNotifier {
 
       if (txFound && rxFound) {
         await Future.delayed(const Duration(milliseconds: 500));
-        debugPrint("[BLE] 👉 Sending Start Signal (0xAA) to RX...");
-        try {
-          await _rxCharacteristic!.write([0xAA], withoutResponse: false);
-          debugPrint("[BLE] ✅ Start Signal (0xAA) Sent successfully!");
-          _updateStatus("接続完了");
-        } catch (e) {
-          debugPrint("[BLE] ❌ Start Signal Write Failed: $e");
-          _updateStatus("エラー: デバイスの準備に失敗");
-          await disconnect();
-        }
+        await _rxCharacteristic!.write([0xAA], withoutResponse: false);
+        _updateStatus("接続完了");
+        // ★★★★★ 接続完了後に時刻同期を開始 ★★★★★
+        startTimeSync();
       } else {
         _updateStatus("エラー: 必要なキャラクタリスティックが見つかりません");
-        debugPrint("[BLE] ❌ TX Found: $txFound, RX Found: $rxFound");
         await disconnect();
       }
     } catch (e) {
       _updateStatus("サービス検索エラー: $e");
-      debugPrint("[BLE] ❌ Service discovery error: $e");
       await disconnect();
+    }
+  }
+
+  // ★★★★★ 受信データをPongかセンサーデータか判別するディスパッチャ ★★★★★
+  void _onDataDispatcher(List<int> data) {
+    if (data.isEmpty) return;
+
+    // Pongメッセージの形式: 0xCC (ヘッダ) + T1 (8バイト) + T2 (8バイト) = 17バイト
+    if (data.length == 17 && data[0] == 0xCC) {
+      _handlePong(data);
+    } else {
+      _handleSensorStream(data);
     }
   }
 
   final List<int> _receiveBuffer = [];
   int _expectedPacketSize = -1;
 
-  void _onDataReceived(List<int> data) {
-    if (data.isEmpty) return;
+  // センサーデータストリームを処理する既存のロジック
+  void _handleSensorStream(List<int> data) {
     _receiveBuffer.addAll(data);
     while (true) {
       if (_expectedPacketSize == -1 && _receiveBuffer.length >= 4) {
@@ -204,16 +210,12 @@ class BleProvider with ChangeNotifier {
         _expectedPacketSize =
             ByteData.view(header.buffer).getUint32(0, Endian.little);
         _receiveBuffer.removeRange(0, 4);
-        debugPrint(
-            "[DATA] Header parsed. Expecting packet of size: $_expectedPacketSize bytes.");
       }
       if (_expectedPacketSize != -1 &&
           _receiveBuffer.length >= _expectedPacketSize) {
         final compressedPacket =
             Uint8List.fromList(_receiveBuffer.sublist(0, _expectedPacketSize));
         _receiveBuffer.removeRange(0, _expectedPacketSize);
-        debugPrint(
-            "[DATA] Complete packet received. Size: ${compressedPacket.length}. Remaining buffer: ${_receiveBuffer.length}");
         _processPacket(compressedPacket);
         _expectedPacketSize = -1;
       } else {
@@ -222,9 +224,100 @@ class BleProvider with ChangeNotifier {
     }
   }
 
-  Future<void> _processPacket(Uint8List compressedPacket) async {
-    debugPrint("[PROC] Processing packet... Size: ${compressedPacket.length}");
+  // ★★★★★ ここから時刻同期機能のメソッド群 ★★★★★
 
+  /// 定期的な時刻同期を開始する
+  void startTimeSync() {
+    _timeSyncTimer?.cancel(); // 既存のタイマーはキャンセル
+    _timeSyncStatus = "時刻同期中...";
+    notifyListeners();
+    // 接続直後に1回実行し、その後は1分ごとに実行
+    _sendPing();
+    _timeSyncTimer =
+        Timer.periodic(const Duration(minutes: 1), (timer) => _sendPing());
+  }
+
+  /// ファームウェアにPingメッセージを送信する
+  Future<void> _sendPing() async {
+    if (!_isConnected || _rxCharacteristic == null) return;
+
+    try {
+      // T1: 現在のUnixタイムスタンプ(ミリ秒)
+      final t1 = DateTime.now().millisecondsSinceEpoch;
+
+      final buffer = ByteData(9);
+      buffer.setUint8(0, 0xBB); // 0xBB: Pingメッセージのヘッダ
+      buffer.setUint64(1, t1, Endian.little);
+
+      debugPrint("[SYNC] 👉 Sending Ping with T1: $t1");
+      await _rxCharacteristic!
+          .write(buffer.buffer.asUint8List(), withoutResponse: false);
+    } catch (e) {
+      debugPrint("[SYNC] ❌ Error sending Ping: $e");
+    }
+  }
+
+  /// ファームウェアからのPongメッセージを処理する
+  void _handlePong(List<int> pongData) {
+    // T3: Pongメッセージをアプリが受信した時刻
+    final t3 = DateTime.now().millisecondsSinceEpoch;
+
+    final view = ByteData.view(Uint8List.fromList(pongData).buffer);
+    // T1: Ping送信時にアプリが記録した時刻 (ファームウェアから返却された値)
+    final t1 = view.getUint64(1, Endian.little);
+    // T2: Pingをファームウェアが受信した時刻 (マイクロ秒)
+    final t2Microseconds = view.getUint64(9, Endian.little);
+
+    // RTT (Round Trip Time) をミリ秒で計算
+    final rtt = t3 - t1;
+    // 片道遅延 (One Way Delay)
+    final oneWayDelay = rtt / 2;
+
+    // ファームウェアがT2を記録した時点の、サーバー(アプリ)時刻を推定
+    final estimatedServerTimeAtT2 = t1 + oneWayDelay;
+    // クロックオフセットを計算 (ms)
+    // Offset = 推定サーバー時刻 - ファームウェア時刻
+    final offset = estimatedServerTimeAtT2 - (t2Microseconds / 1000.0);
+
+    debugPrint(
+        "[SYNC] ✅ Pong received. T1: $t1, T2: $t2Microseconds us, T3: $t3");
+    debugPrint("[SYNC] RTT: $rtt ms, Offset: ${offset.toStringAsFixed(2)} ms");
+
+    _timeSyncStatus = "オフセット: ${offset.toStringAsFixed(2)} ms (RTT: ${rtt} ms)";
+    notifyListeners();
+
+    _sendOffsetToServer(offset, DateTime.fromMillisecondsSinceEpoch(t3));
+  }
+
+  /// 計算したオフセット値をサーバーに送信する
+  Future<void> _sendOffsetToServer(
+      double offsetMs, DateTime calculatedAt) async {
+    if (!_authProvider.isAuthenticated) return;
+
+    final body = jsonEncode({
+      'user_id': _authProvider.userId,
+      'offset_ms': offsetMs,
+      'calculated_at_utc': calculatedAt.toUtc().toIso8601String(),
+    });
+
+    try {
+      // このエンドポイントは設計書に基づき存在すると仮定
+      final url = Uri.parse('${_config.httpBaseUrl}/api/v1/timestamps/sync');
+      debugPrint("[SYNC] 🚀 Sending offset to server: $body");
+      await http
+          .post(url, headers: {'Content-Type': 'application/json'}, body: body)
+          .timeout(const Duration(seconds: 10));
+      debugPrint("[SYNC] ✅ Offset successfully sent to server.");
+    } catch (e) {
+      debugPrint('[SYNC] ❌ Error sending offset to server: $e');
+      _timeSyncStatus = "オフセット送信失敗";
+      notifyListeners();
+    }
+  }
+
+  // ★★★★★ ここまでが時刻同期機能のメソッド群 ★★★★★
+
+  Future<void> _processPacket(Uint8List compressedPacket) async {
     _sendDataToCollector(compressedPacket);
     compute(_decompressAndParseIsolate, compressedPacket).then((decoded) {
       if (decoded != null) {
@@ -232,25 +325,20 @@ class BleProvider with ChangeNotifier {
           connectedDeviceId = decoded.deviceId;
         }
         _updateDataBuffer(decoded.points);
-      } else {
-        debugPrint("[PROC] ❌ Decompression or parsing failed.");
       }
     });
 
     if (_rxCharacteristic != null) {
       await Future.delayed(const Duration(milliseconds: 50));
-      debugPrint("[ACK] 👉 Sending ACK (0x01) to MCU...");
       try {
         await _rxCharacteristic!.write([0x01], withoutResponse: false);
-        debugPrint("[ACK] ✅ ACK (0x01) sent successfully.");
       } catch (e) {
         debugPrint("[ACK] ❌ ACK write operation failed: $e");
       }
-    } else {
-      debugPrint("[ACK] ❌ Cannot send ACK: RX characteristic is null!");
     }
   }
 
+  // (_sendDataToCollector, _updateDataBuffer, _calculateValence は変更なし)
   Future<void> _sendDataToCollector(Uint8List compressedPacket) async {
     if (!_authProvider.isAuthenticated) return;
     final String payloadBase64 = base64Encode(compressedPacket);
@@ -258,12 +346,9 @@ class BleProvider with ChangeNotifier {
         {'user_id': _authProvider.userId, 'payload_base64': payloadBase64});
     try {
       final url = Uri.parse('${_config.httpBaseUrl}/api/v1/data');
-      debugPrint("[HTTP] Sending data to collector...");
-      // ★★★★★ 変更点(2): タイムアウトを5秒に延長 ★★★★★
       await http
           .post(url, headers: {'Content-Type': 'application/json'}, body: body)
           .timeout(const Duration(seconds: 5));
-      debugPrint("[HTTP] Successfully sent data.");
     } catch (e) {
       debugPrint('[HTTP] ❌ Error sending data to collector: $e');
     }
@@ -275,8 +360,6 @@ class BleProvider with ChangeNotifier {
       _dataBuffer.removeRange(0, _dataBuffer.length - bufferSize);
     }
     _calculateValence();
-
-    // ★★★★★ 変更点(1)の続き: すぐにUIを更新せず、フラグを立てるだけにする ★★★★★
     _needsUiUpdate = true;
   }
 
@@ -298,7 +381,6 @@ class BleProvider with ChangeNotifier {
   }
 
   Future<void> disconnect() async {
-    debugPrint("[BLE] Disconnecting from device...");
     await _connectionStateSubscription?.cancel();
     _connectionStateSubscription = null;
     await _valueSubscription?.cancel();
@@ -313,6 +395,8 @@ class BleProvider with ChangeNotifier {
     _valueSubscription = null;
     _connectionStateSubscription?.cancel();
     _connectionStateSubscription = null;
+    _timeSyncTimer?.cancel(); // ★★★★★ タイマーを停止 ★★★★★
+    _timeSyncTimer = null;
     _targetDevice = null;
     _isConnected = false;
     _dataBuffer.clear();
@@ -321,8 +405,8 @@ class BleProvider with ChangeNotifier {
     _receiveBuffer.clear();
     _expectedPacketSize = -1;
     _updateStatus("未接続");
+    _timeSyncStatus = "時刻未同期"; // ★★★★★ ステータスをリセット ★★★★★
     notifyListeners();
-    debugPrint("[BLE] Cleanup complete.");
   }
 
   void _updateStatus(String message) {
