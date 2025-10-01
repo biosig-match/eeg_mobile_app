@@ -4,6 +4,7 @@
 
 list(APPEND FLUTTER_PLUGIN_LIST
   record_linux
+  url_launcher_linux
   zstandard_linux
 )
 

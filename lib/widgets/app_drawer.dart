@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../screens/analysis_screen.dart';
+import '../screens/bids_export_screen.dart';
 import '../screens/experiments_screen.dart';
 
 class AppDrawer extends StatelessWidget {
@@ -39,6 +40,17 @@ class AppDrawer extends StatelessWidget {
               Navigator.of(context).pop();
               Navigator.of(context).push(
                   MaterialPageRoute(builder: (_) => const AnalysisScreen()));
+            },
+          ),
+          // ★★★ BIDSエクスポート画面への導線を追加 ★★★
+          const Divider(),
+          ListTile(
+            leading: const Icon(Icons.archive_outlined),
+            title: const Text('BIDSエクスポート状況'),
+            onTap: () {
+              Navigator.of(context).pop();
+              Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const BidsExportScreen()));
             },
           ),
         ],

@@ -20,6 +20,7 @@ dependencies:
   # データ処理 & 通信
   zstandard: ^1.3.27
   http: ^1.2.1
+  url_launcher: ^6.1.14
   file_picker: ^8.0.5
   path: ^1.9.0
   record: ^6.0.0

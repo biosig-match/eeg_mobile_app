@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
@@ -20,7 +21,7 @@ class SessionProvider with ChangeNotifier {
   String _statusMessage = "準備完了";
 
   List<Experiment> get experiments => _experiments;
-  Experiment? get selectedExperiment =>
+  Experiment get selectedExperiment =>
       _experiments.firstWhere((e) => e.id == _selectedExperimentId,
           orElse: () => Experiment.empty());
   bool get isExperimentSelected => _selectedExperimentId != null;
@@ -32,18 +33,18 @@ class SessionProvider with ChangeNotifier {
     fetchExperiments();
   }
 
-  // --- 実験管理 (変更なし) ---
   Future<void> fetchExperiments() async {
-    // ... (no changes in this method)
+    if (!_authProvider.isAuthenticated) return;
     _statusMessage = "実験リストを読込中...";
     notifyListeners();
     try {
       final url = Uri.parse('${_config.httpBaseUrl}/api/v1/experiments');
-      final response = await http.get(url);
+      final response =
+          await http.get(url, headers: {'X-User-Id': _authProvider.userId!});
       if (response.statusCode == 200) {
-        final List<dynamic> data = jsonDecode(response.body);
+        final List<dynamic> data = jsonDecode(utf8.decode(response.bodyBytes));
         _experiments = data.map((json) => Experiment.fromJson(json)).toList();
-        _statusMessage = "実験を選択してください";
+        _statusMessage = _experiments.isEmpty ? "参加中の実験がありません" : "実験を選択してください";
       } else {
         throw Exception('実験リストの取得に失敗: ${response.statusCode}');
       }
@@ -53,35 +54,83 @@ class SessionProvider with ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> createExperiment(
-      {required String name, required String description}) async {
-    // ... (no changes in this method)
-    final url = Uri.parse('${_config.httpBaseUrl}/api/v1/experiments');
+  // ★★★ 要件①: 実験作成機能の修正 ★★★
+  Future<void> createExperiment({
+    required String name,
+    required String description,
+    required String presentationOrder,
+    File? stimuliCsvFile,
+    List<File>? stimuliImageFiles,
+  }) async {
+    if (!_authProvider.isAuthenticated) return;
+    _statusMessage = "新規実験を作成中...";
+    notifyListeners();
+
     try {
-      final response = await http.post(
-        url,
-        headers: {'Content-Type': 'application/json'},
+      // 1. 実験オブジェクトの作成
+      final urlExp = Uri.parse('${_config.httpBaseUrl}/api/v1/experiments');
+      final expResponse = await http.post(
+        urlExp,
+        headers: {
+          'Content-Type': 'application/json',
+          'X-User-Id': _authProvider.userId!,
+        },
         body: jsonEncode({
           "name": name,
           "description": description,
-          "settings": {"visibility": "public"}
+          "presentation_order": presentationOrder,
         }),
       );
-      if (response.statusCode == 201) {
-        // Created
-        await fetchExperiments(); // リストを再取得
-      } else {
-        throw Exception('実験の作成に失敗: ${response.body}');
+
+      if (expResponse.statusCode != 201) {
+        throw Exception('実験の作成に失敗: ${expResponse.body}');
       }
+      final newExp = jsonDecode(expResponse.body);
+      final newExperimentId = newExp['experiment_id'];
+
+      // 2. 刺激ファイルのアップロード (ファイルが指定されている場合)
+      if (stimuliCsvFile != null &&
+          stimuliImageFiles != null &&
+          stimuliImageFiles.isNotEmpty) {
+        _statusMessage = "刺激ファイルをアップロード中...";
+        notifyListeners();
+        final urlStimuli = Uri.parse(
+            '${_config.httpBaseUrl}/api/v1/experiments/$newExperimentId/stimuli');
+        var request = http.MultipartRequest('POST', urlStimuli);
+        request.headers['X-User-Id'] = _authProvider.userId!;
+
+        request.files.add(await http.MultipartFile.fromPath(
+          'stimuli_definition_csv',
+          stimuliCsvFile.path,
+          filename: p.basename(stimuliCsvFile.path),
+        ));
+
+        for (var file in stimuliImageFiles) {
+          request.files.add(await http.MultipartFile.fromPath(
+            'stimulus_files',
+            file.path,
+            filename: p.basename(file.path),
+          ));
+        }
+        final response = await request.send();
+        if (response.statusCode != 202) {
+          final respStr = await response.stream.bytesToString();
+          throw Exception('刺激ファイルのアップロードに失敗: $respStr');
+        }
+      }
+
+      await fetchExperiments(); // リストを再取得してUIを更新
+      _statusMessage = "実験が正常に作成されました";
     } catch (e) {
       _statusMessage = "エラー: $e";
+    } finally {
       notifyListeners();
     }
   }
 
   void selectExperiment(String experimentId) {
     _selectedExperimentId = experimentId;
-    _statusMessage = "'${selectedExperiment?.name}' が選択されました";
+    _statusMessage = "'${selectedExperiment.name}' が選択されました";
     notifyListeners();
   }
 
@@ -90,33 +139,64 @@ class SessionProvider with ChangeNotifier {
     notifyListeners();
   }
 
-  // --- セッション管理 (変更あり) ---
-  void startSession({
+  // --- セッション管理 ---
+  Future<void> startSession({
     required SessionType type,
-    required String deviceId, // ★★★ 引数にdeviceIdを追加 ★★★
-  }) {
+    required String deviceId,
+    required Map<String, dynamic>? clockOffsetInfo,
+  }) async {
     if (isSessionRunning ||
         !isExperimentSelected ||
-        _authProvider.userId == null) return;
+        !_authProvider.isAuthenticated) return;
 
     final creationTime = DateTime.now().toUtc();
     final sessionId =
-        '${_authProvider.userId}-${creationTime.millisecondsSinceEpoch}';
+        '${type.toString().split(".").last}-${creationTime.millisecondsSinceEpoch}';
 
     _currentSession = Session(
       id: sessionId,
       userId: _authProvider.userId!,
       experimentId: _selectedExperimentId!,
-      deviceId: deviceId, // ★★★ 受け取ったdeviceIdをセット ★★★
+      deviceId: deviceId,
       startTime: creationTime,
       type: type,
+      clockOffsetInfo: clockOffsetInfo,
     );
-    _statusMessage = "セッション実行中...";
+    _statusMessage = "セッション開始をサーバーに通知中...";
+    notifyListeners();
+
+    try {
+      final url = Uri.parse('${_config.httpBaseUrl}/api/v1/sessions/start');
+      final response = await http.post(
+        url,
+        headers: {
+          'Content-Type': 'application/json',
+          'X-User-Id': _authProvider.userId!,
+        },
+        body: jsonEncode({
+          'session_id': _currentSession!.id,
+          'user_id': _currentSession!.userId,
+          'experiment_id': _currentSession!.experimentId,
+          'start_time': _currentSession!.startTime.toIso8601String(),
+          'session_type': _currentSession!.type.toString().split('.').last,
+        }),
+      );
+
+      if (response.statusCode != 201) {
+        _currentSession = null;
+        throw Exception("セッション開始に失敗: ${response.body}");
+      }
+      _statusMessage = "セッション実行中...";
+    } catch (e) {
+      _currentSession = null;
+      _statusMessage = "エラー: $e";
+    }
     notifyListeners();
   }
 
-  Future<void> endSessionAndUpload({PlatformFile? eventCsvFile}) async {
-    // ★★★ このメソッドは endSessionAndUpload を呼び出すだけなので変更不要 ★★★
+  // ★★★ 要件④, ⑤: セッション終了とアップロード機能の改修 ★★★
+  Future<void> endSessionAndUpload(
+      {String? eventCsvString, PlatformFile? eventCsvFile}) async {
     if (!isSessionRunning || _currentSession == null) return;
 
     _currentSession!.endSession();
@@ -126,16 +206,21 @@ class SessionProvider with ChangeNotifier {
     final url = Uri.parse('${_config.httpBaseUrl}/api/v1/sessions/end');
     try {
       var request = http.MultipartRequest('POST', url);
+      request.headers['X-User-Id'] = _authProvider.userId!;
 
-      request.files.add(http.MultipartFile.fromString(
-        'metadata',
-        jsonEncode(_currentSession!.toJson()),
-        filename: 'metadata.json',
-      ));
+      // metadataパート: JSONを文字列として送信
+      request.fields['metadata'] = jsonEncode(_currentSession!.toJson());
 
-      if (eventCsvFile != null && eventCsvFile.path != null) {
+      // events_log_csvパート: 文字列またはファイルから作成
+      if (eventCsvString != null) {
+        request.files.add(http.MultipartFile.fromString(
+          'events_log_csv',
+          eventCsvString,
+          filename: 'events.csv',
+        ));
+      } else if (eventCsvFile != null && eventCsvFile.path != null) {
         request.files.add(await http.MultipartFile.fromPath(
-          'events_file',
+          'events_log_csv',
           eventCsvFile.path!,
           filename: p.basename(eventCsvFile.path!),
         ));
@@ -150,6 +235,7 @@ class SessionProvider with ChangeNotifier {
       }
     } catch (e) {
       _statusMessage = "エラー: $e";
+      // 失敗してもセッションは終了させる
     } finally {
       _currentSession = null;
       notifyListeners();

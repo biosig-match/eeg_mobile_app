@@ -10,6 +10,7 @@ import '../widgets/eeg_chart.dart';
 import '../widgets/valence_chart.dart';
 import 'experiments_screen.dart';
 import 'session_summary_screen.dart';
+import 'stimulus_presentation_screen.dart'; // ★★★ 新しい画面をインポート ★★★
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -31,16 +32,22 @@ class _HomeScreenState extends State<HomeScreen> {
     ].request();
   }
 
+  // ★★★ セッション開始時の選択肢を増やす ★★★
   void _showSessionTypeDialog() {
-    // ★★★ Providerの取得をダイアログ表示前に行う ★★★
     final sessionProvider = context.read<SessionProvider>();
     final bleProvider = context.read<BleProvider>();
     final connectedDeviceId = bleProvider.connectedDeviceId;
+    final clockOffsetInfo = bleProvider.lastClockOffsetInfo;
 
-    // デバイスIDが取得できていない場合はセッションを開始しない
     if (connectedDeviceId == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text("デバイスIDが不明です。再接続してください。")),
+      );
+      return;
+    }
+    if (clockOffsetInfo == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("時刻同期が完了していません。")),
       );
       return;
     }
@@ -48,34 +55,86 @@ class _HomeScreenState extends State<HomeScreen> {
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
+        title: const Text("セッションの実行方法を選択"),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            ElevatedButton(
+              child: const Text("アプリ内で刺激を提示"),
+              onPressed: () {
+                Navigator.of(ctx).pop(); // ダイアログを閉じる
+                _startInAppPresentationSession(
+                    sessionProvider, connectedDeviceId, clockOffsetInfo);
+              },
+            ),
+            const SizedBox(height: 8),
+            ElevatedButton(
+              child: const Text("外部アプリで刺激を提示 (PsychoPyなど)"),
+              onPressed: () {
+                Navigator.of(ctx).pop(); // ダイアログを閉じる
+                _startExternalSession(
+                    sessionProvider, connectedDeviceId, clockOffsetInfo);
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ★★★ アプリ内提示セッションを開始するロジック ★★★
+  void _startInAppPresentationSession(SessionProvider sessionProvider,
+      String deviceId, Map<String, dynamic> clockOffsetInfo) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
         title: const Text("セッション種別を選択"),
-        content: const Text("このセッションはキャリブレーションですか、本計測ですか？"),
         actions: [
           TextButton(
             child: const Text("キャリブレーション"),
-            onPressed: () {
-              // ★★★ deviceIdを渡す ★★★
-              sessionProvider.startSession(
-                type: SessionType.calibration,
-                deviceId: connectedDeviceId,
-              );
+            onPressed: () async {
               Navigator.of(ctx).pop();
+              await sessionProvider.startSession(
+                type: SessionType.calibration,
+                deviceId: deviceId,
+                clockOffsetInfo: clockOffsetInfo,
+              );
+              if (mounted && sessionProvider.isSessionRunning) {
+                Navigator.of(context).push(MaterialPageRoute(
+                    builder: (_) => const StimulusPresentationScreen()));
+              }
             },
           ),
           FilledButton(
             child: const Text("本計測"),
-            onPressed: () {
-              // ★★★ deviceIdを渡す ★★★
-              sessionProvider.startSession(
-                type: SessionType.main,
-                deviceId: connectedDeviceId,
-              );
+            onPressed: () async {
               Navigator.of(ctx).pop();
+              await sessionProvider.startSession(
+                type: SessionType.main_task,
+                deviceId: deviceId,
+                clockOffsetInfo: clockOffsetInfo,
+              );
+              if (mounted && sessionProvider.isSessionRunning) {
+                Navigator.of(context).push(MaterialPageRoute(
+                    builder: (_) => const StimulusPresentationScreen()));
+              }
             },
           ),
         ],
       ),
     );
+  }
+
+  // ★★★ 外部提示セッションを開始するロジック ★★★
+  void _startExternalSession(SessionProvider sessionProvider, String deviceId,
+      Map<String, dynamic> clockOffsetInfo) async {
+    await sessionProvider.startSession(
+      type: SessionType.main_external,
+      deviceId: deviceId,
+      clockOffsetInfo: clockOffsetInfo,
+    );
+    // 外部セッションの場合は刺激提示画面には遷移しない
   }
 
   @override
@@ -107,8 +166,7 @@ class _HomeScreenState extends State<HomeScreen> {
             Card(
               child: ListTile(
                 leading: const Icon(Icons.science_outlined),
-                title: Text(
-                    sessionProvider.selectedExperiment?.name ?? "実験が選択されていません"),
+                title: Text(sessionProvider.selectedExperiment.name),
                 subtitle: Text(sessionProvider.statusMessage,
                     style: TextStyle(color: theme.colorScheme.primary)),
                 trailing: TextButton(
@@ -129,22 +187,16 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ),
             const SizedBox(height: 8),
-            // ★★★ 快不快チャートのflex比率を調整 ★★★
             Expanded(
               flex: 2,
               child: ValenceChart(data: bleProvider.valenceHistory),
             ),
-            // ★★★ ボタンをColumn内に移動 ★★★
             const SizedBox(height: 16),
             _buildActionButton(context, bleProvider, sessionProvider),
-            const SizedBox(height: 8), // 下部に少し余白を追加
+            const SizedBox(height: 8),
           ],
         ),
       ),
-      // ★★★ FloatingActionButtonを削除 ★★★
-      // floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
-      // floatingActionButton:
-      //     _buildActionButton(context, bleProvider, sessionProvider),
     );
   }
 
@@ -161,11 +213,12 @@ class _HomeScreenState extends State<HomeScreen> {
     if (session.isSessionRunning) {
       return FloatingActionButton.extended(
         onPressed: () {
+          // ★★★ 刺激提示画面からは直接終了させないので、このボタンは外部セッション用になる ★★★
           Navigator.of(context).pushReplacement(
             MaterialPageRoute(builder: (_) => const SessionSummaryScreen()),
           );
         },
-        label: const Text("セッション終了"),
+        label: const Text("外部セッションを終了"),
         icon: const Icon(Icons.stop),
         backgroundColor: Colors.red,
       );
