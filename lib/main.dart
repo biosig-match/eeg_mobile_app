@@ -5,7 +5,6 @@ import 'providers/analysis_provider.dart';
 import 'providers/auth_provider.dart';
 import 'providers/bids_provider.dart';
 import 'providers/ble_provider.dart';
-import 'providers/ble_provider_factory.dart';
 import 'providers/media_provider.dart';
 import 'providers/session_provider.dart';
 import 'providers/stimulus_provider.dart';
@@ -34,10 +33,10 @@ class MyApp extends StatelessWidget {
               SessionProvider(serverConfig, context.read<AuthProvider>()),
           update: (_, auth, previous) => SessionProvider(serverConfig, auth),
         ),
-        ChangeNotifierProxyProvider<AuthProvider, BleProviderFactory>(
+        ChangeNotifierProxyProvider<AuthProvider, BleProvider>(
           create: (context) =>
-              BleProviderFactory(serverConfig, context.read<AuthProvider>()),
-          update: (_, auth, previous) => BleProviderFactory(serverConfig, auth),
+              BleProvider(serverConfig, context.read<AuthProvider>()),
+          update: (_, auth, previous) => BleProvider(serverConfig, auth),
         ),
         ChangeNotifierProxyProvider<AuthProvider, AnalysisProvider>(
           create: (context) =>
@@ -51,7 +50,6 @@ class MyApp extends StatelessWidget {
           update: (_, auth, session, previous) =>
               MediaProvider(serverConfig, auth, session),
         ),
-        // ★★★ 新しいProviderを登録 ★★★
         ChangeNotifierProxyProvider<AuthProvider, StimulusProvider>(
           create: (context) =>
               StimulusProvider(serverConfig, context.read<AuthProvider>()),

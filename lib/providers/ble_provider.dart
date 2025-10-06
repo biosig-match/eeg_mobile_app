@@ -2,8 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
+import 'package:bitstream/bitstream.dart';
 import 'package:flutter/foundation.dart';
-import 'package:flutter/scheduler.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:http/http.dart' as http;
 import 'package:zstandard/zstandard.dart';
@@ -13,72 +13,74 @@ import '../utils/config.dart';
 import 'auth_provider.dart';
 import 'ble_provider_interface.dart';
 
-// Isolateで実行するトップレベル関数 (変更なし)
-Future<DecodedPacket?> _decompressAndParseIsolate(
-    Uint8List compressedData) async {
-  final decompressed = await compressedData.decompress();
+enum DeviceType { customEeg, muse2, unknown }
 
-  if (decompressed == null || decompressed.isEmpty) return null;
-
-  final byteData = ByteData.view(decompressed.buffer);
-  const int headerSize = 18;
-  const int pointSize = 53;
-
-  if (decompressed.length < headerSize) return null;
-
-  final deviceIdBytes = decompressed.sublist(0, 17);
-  final deviceId = String.fromCharCodes(deviceIdBytes.where((c) => c != 0));
-
-  final points = <SensorDataPoint>[];
-  final numPoints = (decompressed.length - headerSize) ~/ pointSize;
-
-  for (int i = 0; i < numPoints; i++) {
-    int offset = headerSize + (i * pointSize);
-    final eegs = [
-      for (int ch = 0; ch < 8; ch++)
-        byteData.getUint16(offset + (ch * 2), Endian.little)
-    ];
-    points.add(SensorDataPoint(eegValues: eegs, timestamp: DateTime.now()));
-  }
-
-  return DecodedPacket(deviceId, points);
+class ElectrodeConfig {
+  final String name;
+  final int type;
+  ElectrodeConfig({required this.name, required this.type});
 }
 
 class BleProvider with ChangeNotifier implements BleProviderInterface {
   final ServerConfig _config;
   final AuthProvider _authProvider;
 
+  // --- BLE関連 ---
   BluetoothDevice? _targetDevice;
-  StreamSubscription<List<int>>? _valueSubscription;
+  DeviceType _deviceType = DeviceType.unknown;
+  List<StreamSubscription> _valueSubscriptions = [];
   StreamSubscription<BluetoothConnectionState>? _connectionStateSubscription;
+  StreamSubscription<List<ScanResult>>? _scanSubscription;
   BluetoothCharacteristic? _rxCharacteristic;
   bool _isConnected = false;
   String _statusMessage = "未接続";
-  String? connectedDeviceId;
+  
+  // --- デバイス設定 ---
+  List<ElectrodeConfig> _electrodeConfigs = [];
+  int _eegChannelCount = 0;
 
+  // --- Muse 2 関連 ---
+  static const museControlCharUuid = "273E0001-4C4D-454D-96BE-F03BAC821358";
+  static const eegCharUuids = [
+    "273E0003-4C4D-454D-96BE-F03BAC821358", "273E0004-4C4D-454D-96BE-F03BAC821358",
+    "273E0005-4C4D-454D-96BE-F03BAC821358", "273E0006-4C4D-454D-96BE-F03BAC821358",
+    "273E0007-4C4D-454D-96BE-F03BAC821358",
+  ];
+  final Map<String, int> _museUuidToIndex = {};
+  final List<List<int>> _museEegBuffer = List.generate(5, (_) => []);
+  int _museLastPacketIndex = -1;
+  int _museSampleIndexCounter = 0;
+
+  // --- データバッファリング ---
   static const int sampleRate = 256;
   static const double timeWindowSec = 5.0;
-  static final int bufferSize = (sampleRate * timeWindowSec).toInt();
-  final List<SensorDataPoint> _dataBuffer = [];
+  static final int displayBufferSize = (sampleRate * timeWindowSec).toInt();
+  final List<SensorDataPoint> _displayDataBuffer = [];
+  final List<SensorDataPoint> _serverUploadBuffer = [];
+  static const int samplesPerPayload = 128;
   final List<(DateTime, double)> _valenceHistory = [];
 
+  // --- UI更新 ---
   bool _needsUiUpdate = false;
   Timer? _uiUpdateTimer;
+  
+  // ★★★ 変更点: スキャン状態管理用のタイマーを追加 ★★★
+  Timer? _scanTimeoutTimer;
 
-  Timer? _timeSyncTimer;
-  String _timeSyncStatus = "時刻未同期";
-  // ★★★ 最後に成功した時刻同期情報を保持するプロパティ ★★★
-  Map<String, dynamic>? _lastClockOffsetInfo;
-
+  // --- ゲッター ---
+  @override
   bool get isConnected => _isConnected;
+  @override
   String get statusMessage => _statusMessage;
-  List<SensorDataPoint> get displayData => _dataBuffer;
+  @override
+  List<SensorDataPoint> get displayData => _displayDataBuffer;
+  @override
   List<(DateTime, double)> get valenceHistory => _valenceHistory;
-  String get timeSyncStatus => _timeSyncStatus;
-  String? get deviceId => connectedDeviceId;
-  int get channelCount => _dataBuffer.isNotEmpty ? _dataBuffer.first.eegValues.length : 8;
-  // ★★★ 外部から時刻同期情報を取得するためのゲッター ★★★
-  Map<String, dynamic>? get lastClockOffsetInfo => _lastClockOffsetInfo;
+  @override
+  String? get deviceId => _targetDevice?.remoteId.str;
+  @override
+  int get channelCount => _eegChannelCount;
+  DeviceType get deviceType => _deviceType;
 
   BleProvider(this._config, this._authProvider) {
     _uiUpdateTimer = Timer.periodic(const Duration(milliseconds: 16), (timer) {
@@ -87,35 +89,91 @@ class BleProvider with ChangeNotifier implements BleProviderInterface {
         _needsUiUpdate = false;
       }
     });
+    for (int i = 0; i < eegCharUuids.length; i++) {
+      _museUuidToIndex[eegCharUuids[i].toUpperCase()] = i;
+    }
   }
 
   @override
   void dispose() {
     _uiUpdateTimer?.cancel();
-    _timeSyncTimer?.cancel();
+    _scanTimeoutTimer?.cancel();
+    _scanSubscription?.cancel();
+    disconnect();
     super.dispose();
   }
 
-  Future<void> startScan() async {
+  @override
+  Future<void> startScan({DeviceType targetDeviceType = DeviceType.unknown}) async {
+    if (_isConnected || FlutterBluePlus.isScanningNow) {
+      debugPrint("[SCAN] Ignoring request: Already connected or a scan is in progress.");
+      return;
+    }
+
     _updateStatus("デバイスをスキャン中...");
-    FlutterBluePlus.startScan(timeout: const Duration(seconds: 5));
-    FlutterBluePlus.scanResults.listen((results) {
-      for (ScanResult r in results) {
-        if (r.device.platformName.startsWith("EEG-Device")) {
-          FlutterBluePlus.stopScan();
-          _connectToDevice(r.device);
-          break;
+    _deviceType = targetDeviceType;
+
+    // 以前のスキャンリソースをクリーンアップ
+    _scanTimeoutTimer?.cancel();
+    await _scanSubscription?.cancel();
+
+    // スキャン結果のリスナーをセット
+    _scanSubscription = FlutterBluePlus.scanResults.listen(
+      (results) {
+        ScanResult? foundResult;
+        for (ScanResult r in results) {
+          final deviceName = r.device.platformName;
+          if (deviceName.isEmpty) continue;
+
+          bool isCustomDevice = deviceName.startsWith("EEG-Device");
+          bool isMuse = deviceName.toLowerCase().contains("muse");
+
+          if ((targetDeviceType == DeviceType.customEeg && isCustomDevice) ||
+              (targetDeviceType == DeviceType.muse2 && isMuse) ||
+              (targetDeviceType == DeviceType.unknown && (isCustomDevice || isMuse))) {
+            foundResult = r;
+            break;
+          }
         }
+
+        if (foundResult != null) {
+          // デバイスが見つかったら、スキャン関連のリソースをすべて停止・破棄して接続処理へ
+          _scanTimeoutTimer?.cancel();
+          _scanSubscription?.cancel();
+          FlutterBluePlus.stopScan();
+          _connectToDevice(foundResult.device);
+        }
+      },
+      onError: (e) {
+        debugPrint("[SCAN] Error listening to scan results: $e");
+        _updateStatus("スキャンエラー: $e");
+      }
+    );
+
+    // タイムアウト用のタイマーを設定
+    _scanTimeoutTimer = Timer(const Duration(seconds: 10), () {
+      debugPrint("[SCAN] Scan timed out.");
+      _scanSubscription?.cancel();
+      FlutterBluePlus.stopScan();
+      if (!_isConnected) {
+         _updateStatus("デバイスが見つかりませんでした");
       }
     });
+    await FlutterBluePlus.startScan(timeout: null);
   }
 
   Future<void> _connectToDevice(BluetoothDevice device) async {
     _updateStatus("接続中: ${device.platformName}");
     _targetDevice = device;
+    
+    if (device.platformName.startsWith("EEG-Device")) {
+      _deviceType = DeviceType.customEeg;
+    } else if (device.platformName.toLowerCase().contains("muse")) {
+      _deviceType = DeviceType.muse2;
+    }
 
+    // 接続状態の監視を開始
     _connectionStateSubscription = device.connectionState.listen((state) {
-      debugPrint("[BLE] Connection state changed: $state");
       if (state == BluetoothConnectionState.disconnected) {
         _isConnected = false;
         _updateStatus("切断されました");
@@ -126,58 +184,45 @@ class BleProvider with ChangeNotifier implements BleProviderInterface {
 
     try {
       await device.connect(timeout: const Duration(seconds: 15));
-      debugPrint("[BLE] ✅ Connect method successful.");
       _isConnected = true;
       notifyListeners();
-
-      _updateStatus("デバイスを準備中 (MTU)...");
-      try {
-        int mtu = await device.requestMtu(512);
-        debugPrint("[BLE] ✅ MTU successfully negotiated: $mtu bytes");
-      } catch (e) {
-        debugPrint("[BLE] ⚠️ MTU request failed, but continuing: $e");
-      }
-
-      _updateStatus("デバイスを準備中 (Services)...");
+      try { await device.requestMtu(512); } catch (e) { debugPrint("[BLE] MTU request failed: $e"); }
       await _setupServices(device);
     } catch (e) {
-      debugPrint("[BLE] ❌ Connection failed: $e");
-      await _connectionStateSubscription?.cancel();
-      _updateStatus("接続に失敗しました");
+      _updateStatus("接続に失敗しました: $e");
       _cleanUp();
     }
   }
-
+  
   Future<void> _setupServices(BluetoothDevice device) async {
+    _updateStatus("サービスを検索中...");
+    if (_deviceType == DeviceType.customEeg) {
+      await _setupCustomEegServices(device);
+    } else if (_deviceType == DeviceType.muse2) {
+      await _setupMuse2Services(device);
+    } else {
+      _updateStatus("エラー: 未対応のデバイスです");
+      await disconnect();
+    }
+  }
+
+  Future<void> _setupCustomEegServices(BluetoothDevice device) async {
     try {
       final services = await device.discoverServices();
-      bool txFound = false;
-      bool rxFound = false;
-
+      BluetoothCharacteristic? txChar;
       for (var service in services) {
-        if (service.uuid.toString().toUpperCase() ==
-            "6E400001-B5A3-F393-E0A9-E50E24DCCA9E") {
+        if (service.uuid.toString().toUpperCase() == "6E400001-B5A3-F393-E0A9-E50E24DCCA9E") {
           for (var char in service.characteristics) {
-            if (char.uuid.toString().toUpperCase() ==
-                "6E400003-B5A3-F393-E0A9-E50E24DCCA9E") {
-              await char.setNotifyValue(true);
-              _valueSubscription =
-                  char.lastValueStream.listen(_onDataDispatcher);
-              txFound = true;
-            } else if (char.uuid.toString().toUpperCase() ==
-                "6E400002-B5A3-F393-E0A9-E50E24DCCA9E") {
-              _rxCharacteristic = char;
-              rxFound = true;
-            }
+            if (char.uuid.toString().toUpperCase() == "6E400003-B5A3-F393-E0A9-E50E24DCCA9E") txChar = char;
+            else if (char.uuid.toString().toUpperCase() == "6E400002-B5A3-F393-E0A9-E50E24DCCA9E") _rxCharacteristic = char;
           }
         }
       }
-
-      if (txFound && rxFound) {
-        await Future.delayed(const Duration(milliseconds: 500));
+      if (txChar != null && _rxCharacteristic != null) {
+        await txChar.setNotifyValue(true);
+        _valueSubscriptions.add(txChar.lastValueStream.listen(_onDataDispatcher));
         await _rxCharacteristic!.write([0xAA], withoutResponse: false);
-        _updateStatus("接続完了");
-        startTimeSync();
+        _updateStatus("接続完了: ${device.platformName}");
       } else {
         _updateStatus("エラー: 必要なキャラクタリスティックが見つかりません");
         await disconnect();
@@ -187,200 +232,341 @@ class BleProvider with ChangeNotifier implements BleProviderInterface {
       await disconnect();
     }
   }
-
-  void _onDataDispatcher(List<int> data) {
-    if (data.isEmpty) return;
-
-    if (data.length == 17 && data[0] == 0xCC) {
-      _handlePong(data);
-    } else {
-      _handleSensorStream(data);
-    }
-  }
-
-  final List<int> _receiveBuffer = [];
-  int _expectedPacketSize = -1;
-
-  void _handleSensorStream(List<int> data) {
-    _receiveBuffer.addAll(data);
-    while (true) {
-      if (_expectedPacketSize == -1 && _receiveBuffer.length >= 4) {
-        final header = Uint8List.fromList(_receiveBuffer.sublist(0, 4));
-        _expectedPacketSize =
-            ByteData.view(header.buffer).getUint32(0, Endian.little);
-        _receiveBuffer.removeRange(0, 4);
-      }
-      if (_expectedPacketSize != -1 &&
-          _receiveBuffer.length >= _expectedPacketSize) {
-        final compressedPacket =
-            Uint8List.fromList(_receiveBuffer.sublist(0, _expectedPacketSize));
-        _receiveBuffer.removeRange(0, _expectedPacketSize);
-        _processPacket(compressedPacket);
-        _expectedPacketSize = -1;
-      } else {
-        break;
-      }
-    }
-  }
-
-  void startTimeSync() {
-    _timeSyncTimer?.cancel();
-    _timeSyncStatus = "時刻同期中...";
-    notifyListeners();
-    _sendPing();
-    _timeSyncTimer =
-        Timer.periodic(const Duration(minutes: 1), (timer) => _sendPing());
-  }
-
-  Future<void> _sendPing() async {
-    if (!_isConnected || _rxCharacteristic == null) return;
-    try {
-      final t1 = DateTime.now().millisecondsSinceEpoch;
-      final buffer = ByteData(9);
-      buffer.setUint8(0, 0xBB);
-      buffer.setUint64(1, t1, Endian.little);
-      debugPrint("[SYNC] 👉 Sending Ping with T1: $t1");
-      await _rxCharacteristic!
-          .write(buffer.buffer.asUint8List(), withoutResponse: false);
-    } catch (e) {
-      debugPrint("[SYNC] ❌ Error sending Ping: $e");
-    }
-  }
-
-  void _handlePong(List<int> pongData) {
-    final t3 = DateTime.now().millisecondsSinceEpoch;
-    final view = ByteData.view(Uint8List.fromList(pongData).buffer);
-    final t1 = view.getUint64(1, Endian.little);
-    final t2Microseconds = view.getUint64(9, Endian.little);
-    final rtt = t3 - t1;
-    final oneWayDelay = rtt / 2;
-    final estimatedServerTimeAtT2 = t1 + oneWayDelay;
-    final offset = estimatedServerTimeAtT2 - (t2Microseconds / 1000.0);
-
-    debugPrint(
-        "[SYNC] ✅ Pong received. T1: $t1, T2: $t2Microseconds us, T3: $t3");
-    debugPrint("[SYNC] RTT: $rtt ms, Offset: ${offset.toStringAsFixed(2)} ms");
-
-    _timeSyncStatus = "オフセット: ${offset.toStringAsFixed(2)} ms (RTT: ${rtt} ms)";
-    // ★★★ 計算したオフセット情報を保持 ★★★
-    _lastClockOffsetInfo = {
-      "offset_ms_avg": offset,
-      "rtt_ms_avg": rtt.toDouble(),
-    };
-    notifyListeners();
-    // サーバーへの送信は不要なのでコメントアウト or 削除
-    // _sendOffsetToServer(offset, DateTime.fromMillisecondsSinceEpoch(t3));
-  }
-
-  Future<void> _processPacket(Uint8List compressedPacket) async {
-    _sendDataToCollector(compressedPacket);
-    compute(_decompressAndParseIsolate, compressedPacket).then((decoded) {
-      if (decoded != null) {
-        if (connectedDeviceId == null) {
-          connectedDeviceId = decoded.deviceId;
-        }
-        _updateDataBuffer(decoded.points);
-      }
-    });
-
-    if (_rxCharacteristic != null) {
-      await Future.delayed(const Duration(milliseconds: 50));
+  
+  Future<void> _setupMuse2Services(BluetoothDevice device) async {
       try {
-        await _rxCharacteristic!.write([0x01], withoutResponse: false);
-      } catch (e) {
-        debugPrint("[ACK] ❌ ACK write operation failed: $e");
+        final services = await device.discoverServices();
+        BluetoothCharacteristic? controlChar;
+        final Map<String, BluetoothCharacteristic> foundEegChars = {};
+        for (var service in services) {
+          for (var char in service.characteristics) {
+            final charUuid = char.uuid.toString().toUpperCase();
+            if (charUuid == museControlCharUuid.toUpperCase()) controlChar = char;
+            else if (eegCharUuids.contains(charUuid)) foundEegChars[charUuid] = char;
+          }
+        }
+        if (controlChar != null && foundEegChars.length >= 4) {
+          _rxCharacteristic = controlChar;
+          for (final char in foundEegChars.values) {
+              await char.setNotifyValue(true);
+              _valueSubscriptions.add(char.onValueReceived.listen((value) => _onDataDispatcher(value, charUuid: char.uuid.toString())));
+          }
+          _eegChannelCount = 4;
+          _electrodeConfigs = [
+            ElectrodeConfig(name: "TP9", type: 0), ElectrodeConfig(name: "AF7", type: 0),
+            ElectrodeConfig(name: "AF8", type: 0), ElectrodeConfig(name: "TP10", type: 0),
+          ];
+          await _sendMuseCommand('p21');
+          await _sendMuseCommand('s');
+          await _sendMuseCommand('d');
+          _updateStatus("接続完了: ${device.platformName}");
+        } else {
+          _updateStatus("エラー: Muse 2の必要なキャラクタリスティックが見つかりません");
+          await disconnect();
+        }
+      } catch(e) {
+        _updateStatus("Muse 2のサービス検索エラー: $e");
+        await disconnect();
       }
+  }
+
+  void _onDataDispatcher(List<int> data, {String? charUuid}) {
+    if (data.isEmpty) return;
+    if (_deviceType == DeviceType.customEeg) {
+      final packetType = data[0];
+      if (packetType == 0xDD) {
+        _handleDeviceConfigPacket(data);
+      } else if (packetType == 0x66) {
+        _handleCustomEegChunkStream(data);
+      }
+    } else if (_deviceType == DeviceType.muse2) {
+      _handleMuse2Stream(data, charUuid!);
     }
   }
 
-  Future<void> _sendDataToCollector(Uint8List compressedPacket) async {
-    // 認証されていない場合は送信をスキップ
-    if (!_authProvider.isAuthenticated) return;
-    
-    try {
-      final String payloadBase64 = base64Encode(compressedPacket);
-      final body = jsonEncode(
-          {'user_id': _authProvider.userId, 'payload_base64': payloadBase64});
+  void _handleDeviceConfigPacket(List<int> data) {
+    debugPrint("[BLE] 📥 Received Device Configuration Packet.");
+    final byteData = ByteData.view(Uint8List.fromList(data).buffer);
+    final numChannels = byteData.getUint8(1);
+    final newConfigs = <ElectrodeConfig>[];
+    const headerSize = 8;
+    const configSize = 10;
+    for (int i = 0; i < numChannels; i++) {
+      final offset = headerSize + (i * configSize);
+      final nameBytes = data.sublist(offset, offset + 8);
+      final nullIndex = nameBytes.indexOf(0);
+      final name = utf8.decode(nameBytes.sublist(0, nullIndex != -1 ? nullIndex : 8));
+      final type = byteData.getUint8(offset + 8);
+      newConfigs.add(ElectrodeConfig(name: name, type: type));
+    }
+    _eegChannelCount = numChannels;
+    _electrodeConfigs = newConfigs;
+    debugPrint("[CONFIG] ✅ Parsed $numChannels channels. First channel: '${_electrodeConfigs.first.name}'");
+    notifyListeners();
+  }
+
+  final List<int> _customEegReceiveBuffer = [];
+  void _handleCustomEegChunkStream(List<int> data) {
+    if (_eegChannelCount == 0) return;
+
+    final int sampleSignalSize = _eegChannelCount * 2;
+    const int sampleMotionSize = 12;
+    const int sampleTriggerSize = 1;
+    final int totalSampleSize = sampleSignalSize + sampleMotionSize + sampleTriggerSize;
+
+    const int chunkSize = 12;
+    const int headerSize = 4;
+    final int totalPacketSize = headerSize + (chunkSize * totalSampleSize);
+
+    _customEegReceiveBuffer.addAll(data);
+
+    while (_customEegReceiveBuffer.length >= totalPacketSize) {
+      final packetData = Uint8List.fromList(_customEegReceiveBuffer.sublist(0, totalPacketSize));
+      _customEegReceiveBuffer.removeRange(0, totalPacketSize);
       
-      final url = Uri.parse('${_config.httpBaseUrl}/api/v1/data');
-      await http
-          .post(url,
-              headers: {
-                'Content-Type': 'application/json',
-                'X-User-Id': _authProvider.userId!
-              },
-              body: body)
-          .timeout(const Duration(seconds: 2)); // タイムアウトを短縮
-    } catch (e) {
-      // サーバー送信エラーは無視（リアルタイム表示に影響しない）
-      debugPrint('[HTTP] Server send failed (ignored): $e');
+      final byteData = ByteData.view(packetData.buffer);
+      if (byteData.getUint8(0) != 0x66) continue;
+
+      final startIndex = byteData.getUint16(1, Endian.little);
+      final numSamples = byteData.getUint8(3);
+      
+      final List<SensorDataPoint> newPoints = [];
+
+      for(int i = 0; i < numSamples; i++) {
+        final offset = headerSize + (i * totalSampleSize);
+        newPoints.add(SensorDataPoint(
+          sampleIndex: startIndex + i,
+          eegValues: [for (int ch = 0; ch < _eegChannelCount; ch++) byteData.getUint16(offset + ch * 2, Endian.little)],
+          accel: [for (int a = 0; a < 3; a++) byteData.getInt16(offset + sampleSignalSize + a * 2, Endian.little)],
+          gyro: [for (int g = 0; g < 3; g++) byteData.getInt16(offset + sampleSignalSize + 6 + g * 2, Endian.little)],
+          triggerState: byteData.getUint8(offset + sampleSignalSize + 12),
+          timestamp: DateTime.now(),
+        ));
+      }
+      _updateDataBuffer(newPoints);
+    }
+  }
+  
+  void _handleMuse2Stream(List<int> data, String charUuid) {
+    if (data.length != 20) return;
+    final view = ByteData.view(Uint8List.fromList(data).buffer);
+    final packetIndex = view.getUint16(0, Endian.big);
+    final samples = <int>[];
+    final reader = BitStream(stream: Uint8List.fromList(data.sublist(2)));
+    for (int i = 0; i < 12; i++) {
+        samples.add(reader.read(bits: 12));
+    }
+    final channelIndex = _museUuidToIndex[charUuid.toUpperCase()];
+    if (channelIndex == null) return;
+    _museEegBuffer[channelIndex] = samples;
+
+    if (channelIndex == 1) {
+        if (_museLastPacketIndex != -1 && packetIndex != (_museLastPacketIndex + 1) & 0xFFFF) {
+            debugPrint("[Muse] Packet loss! prev: $_museLastPacketIndex, current: $packetIndex");
+        }
+        _museLastPacketIndex = packetIndex;
+        final newPoints = <SensorDataPoint>[];
+        for (int i = 0; i < 12; i++) {
+            newPoints.add(SensorDataPoint(
+                sampleIndex: _museSampleIndexCounter++,
+                eegValues: [
+                  _museEegBuffer[0].isNotEmpty ? _museEegBuffer[0][i] : 0,
+                  _museEegBuffer[1].isNotEmpty ? _museEegBuffer[1][i] : 0,
+                  _museEegBuffer[2].isNotEmpty ? _museEegBuffer[2][i] : 0,
+                  _museEegBuffer[3].isNotEmpty ? _museEegBuffer[3][i] : 0,
+                ],
+                accel: [0, 0, 0],
+                gyro: [0, 0, 0],
+                triggerState: 0,
+                timestamp: DateTime.now(),
+            ));
+        }
+        _updateDataBuffer(newPoints);
     }
   }
 
   void _updateDataBuffer(List<SensorDataPoint> newPoints) {
-    _dataBuffer.addAll(newPoints);
-    if (_dataBuffer.length > bufferSize) {
-      _dataBuffer.removeRange(0, _dataBuffer.length - bufferSize);
+    if (newPoints.isEmpty) return;
+    _displayDataBuffer.addAll(newPoints);
+    if (_displayDataBuffer.length > displayBufferSize) {
+      _displayDataBuffer.removeRange(0, _displayDataBuffer.length - displayBufferSize);
     }
     _calculateValence();
     _needsUiUpdate = true;
+    _serverUploadBuffer.addAll(newPoints);
+    if (_serverUploadBuffer.length >= samplesPerPayload) {
+      _prepareAndSendPayload();
+    }
+  }
+  
+  Future<void> _prepareAndSendPayload() async {
+    if (_eegChannelCount == 0) return;
+
+    final samplesToSend = _serverUploadBuffer.sublist(0, samplesPerPayload);
+    _serverUploadBuffer.removeRange(0, samplesPerPayload);
+    final builder = BytesBuilder();
+    
+    final int totalChannelsToServer = _eegChannelCount + (_deviceType == DeviceType.customEeg ? 1 : 0);
+    
+    builder.add([0x02, totalChannelsToServer, 0, 0, 0, 0, 0, 0]);
+
+    for (final config in _electrodeConfigs) {
+      final nameBytes = utf8.encode(config.name);
+      final paddedName = Uint8List(8)..setRange(0, nameBytes.length, nameBytes);
+      builder.add(paddedName);
+      builder.add([config.type, 0]);
+    }
+    if (_deviceType == DeviceType.customEeg) {
+      final trigNameBytes = utf8.encode("TRIG");
+      final trigPaddedName = Uint8List(8)..setRange(0, trigNameBytes.length, trigNameBytes);
+      builder.add(trigPaddedName);
+      builder.add([3, 0]);
+    }
+
+    for (final sample in samplesToSend) {
+      final signalsBytes = ByteData(_eegChannelCount * 2);
+      for (int i = 0; i < _eegChannelCount; i++) {
+        signalsBytes.setUint16(i * 2, sample.eegValues[i], Endian.little);
+      }
+      builder.add(signalsBytes.buffer.asUint8List());
+
+      if (_deviceType == DeviceType.customEeg) {
+        final triggerBytes = ByteData(2);
+        triggerBytes.setUint16(0, sample.triggerState, Endian.little);
+        builder.add(triggerBytes.buffer.asUint8List());
+      }
+
+      final accelBytes = ByteData(6);
+      for (int i = 0; i < 3; i++) accelBytes.setInt16(i * 2, sample.accel[i], Endian.little);
+      builder.add(accelBytes.buffer.asUint8List());
+
+      final gyroBytes = ByteData(6);
+      for (int i = 0; i < 3; i++) gyroBytes.setInt16(i * 2, sample.gyro[i], Endian.little);
+      builder.add(gyroBytes.buffer.asUint8List());
+
+      final impedanceBytes = Uint8List(totalChannelsToServer)..fillRange(0, totalChannelsToServer, 255);
+      builder.add(impedanceBytes);
+    }
+
+    final uncompressedPayload = builder.toBytes();
+    
+    debugPrint('[Payload] Generated Uncompressed Payload. Size: ${uncompressedPayload.length} bytes.');
+    
+    final compressedPayload = await uncompressedPayload.compress();
+    if (compressedPayload == null) {
+      debugPrint('[Payload] Compression failed.');
+      return;
+    }
+    _sendPayloadToServer(compressedPayload, samplesToSend.first.timestamp, samplesToSend.last.timestamp);
   }
 
+  Future<void> _sendPayloadToServer(Uint8List compressedPacket, DateTime startTime, DateTime endTime) async {
+    if (!_authProvider.isAuthenticated || _targetDevice == null) return;
+    
+    final body = jsonEncode({
+      'user_id': _authProvider.userId, 'session_id': null, 'device_id': _targetDevice!.remoteId.str,
+      'timestamp_start_ms': startTime.millisecondsSinceEpoch, 'timestamp_end_ms': endTime.millisecondsSinceEpoch,
+      'payload_base64': base64Encode(compressedPacket)
+    });
+
+    try {
+      final url = Uri.parse('${_config.httpBaseUrl}/api/v1/data');
+      await http.post(url, headers: {'Content-Type': 'application/json', 'X-User-Id': _authProvider.userId!}, body: body)
+          .timeout(const Duration(seconds: 10));
+      debugPrint('[HTTP] ✅ Payload sent to server.');
+    } catch (e) {
+      debugPrint('[HTTP] ❌ Error sending payload: $e');
+    }
+  }
+  
   void _calculateValence() {
-    if (_dataBuffer.length < sampleRate) return;
-    final recentData = _dataBuffer.sublist(_dataBuffer.length - sampleRate);
+    if (_displayDataBuffer.length < sampleRate || _electrodeConfigs.length < 2) return;
+    final recentData = _displayDataBuffer.sublist(_displayDataBuffer.length - sampleRate);
     double powerLeft = 0, powerRight = 0;
+
+    final leftIndices = <int>[];
+    final rightIndices = <int>[];
+    for (int i = 0; i < _electrodeConfigs.length; i++) {
+        final name = _electrodeConfigs[i].name.toLowerCase();
+        final numberMatch = RegExp(r'(\d+)$').firstMatch(name);
+        if (numberMatch != null) {
+            final num = int.tryParse(numberMatch.group(1) ?? "");
+            if (num != null) {
+                if (num % 2 != 0) leftIndices.add(i);
+                else rightIndices.add(i);
+            }
+        } else {
+            if (name.contains('tp9') || name.contains('af7')) leftIndices.add(i);
+            if (name.contains('tp10') || name.contains('af8')) rightIndices.add(i);
+        }
+    }
+    if (leftIndices.isEmpty || rightIndices.isEmpty) return;
+
     for (var point in recentData) {
-      powerLeft += pow(point.eegValues[0] - 2048, 2);
-      powerRight += pow(point.eegValues[1] - 2048, 2);
+      for (var i in leftIndices) powerLeft += pow(point.eegValues[i] - 32768, 2);
+      for (var i in rightIndices) powerRight += pow(point.eegValues[i] - 32768, 2);
     }
     if (powerLeft > 0 && powerRight > 0) {
       final score = log(powerRight) - log(powerLeft);
       _valenceHistory.add((DateTime.now(), score));
-      if (_valenceHistory.length > 200) {
-        _valenceHistory.removeAt(0);
-      }
+      if (_valenceHistory.length > 200) _valenceHistory.removeAt(0);
     }
   }
 
+  Future<void> _sendMuseCommand(String command) async {
+    if (_rxCharacteristic == null) return;
+    await Future.delayed(const Duration(milliseconds: 50));
+    final cmdBytes = utf8.encode(command);
+    final packet = Uint8List(cmdBytes.length + 2)
+      ..[0] = cmdBytes.length + 1
+      ..setRange(1, cmdBytes.length + 1, cmdBytes)
+      ..[cmdBytes.length + 1] = 0x0a;
+    await _rxCharacteristic!.write(packet, withoutResponse: true);
+  }
+
+  @override
   Future<void> disconnect() async {
-    await _connectionStateSubscription?.cancel();
-    _connectionStateSubscription = null;
-    await _valueSubscription?.cancel();
-    _valueSubscription = null;
-    if (_targetDevice != null) {
+    if (_isConnected && _rxCharacteristic != null) {
       try {
-        await _targetDevice!.disconnect();
+        if (_deviceType == DeviceType.customEeg) await _rxCharacteristic!.write([0x5B], withoutResponse: true);
+        else if (_deviceType == DeviceType.muse2) await _sendMuseCommand('h');
       } catch (e) {
-        debugPrint("[BLE] Error during disconnect: $e");
+        debugPrint("[BLE] Error sending stop command: $e");
       }
+      await Future.delayed(const Duration(milliseconds: 100));
     }
-    _targetDevice = null;
+    await _scanSubscription?.cancel();
+    _scanSubscription = null;
+    if (_targetDevice?.isConnected == true) await _targetDevice!.disconnect();
     _cleanUp();
   }
 
   void _cleanUp() {
-    _valueSubscription?.cancel();
-    _valueSubscription = null;
+    _scanTimeoutTimer?.cancel();
+    
+    for (final sub in _valueSubscriptions) { sub.cancel(); }
+    _valueSubscriptions.clear();
     _connectionStateSubscription?.cancel();
-    _connectionStateSubscription = null;
-    _timeSyncTimer?.cancel();
-    _timeSyncTimer = null;
+    _scanSubscription?.cancel();
     _targetDevice = null;
     _isConnected = false;
-    _dataBuffer.clear();
+    _deviceType = DeviceType.unknown;
+    _displayDataBuffer.clear();
+    _serverUploadBuffer.clear();
     _valenceHistory.clear();
-    connectedDeviceId = null;
-    _receiveBuffer.clear();
-    _expectedPacketSize = -1;
+    _customEegReceiveBuffer.clear();
+    _museEegBuffer.forEach((b) => b.clear());
+    _museLastPacketIndex = -1;
+    _electrodeConfigs.clear();
+    _eegChannelCount = 0;
     _updateStatus("未接続");
-    _timeSyncStatus = "時刻未同期";
-    _lastClockOffsetInfo = null; // ★★★ 時刻同期情報をリセット ★★★
     notifyListeners();
   }
-
+  
   void _updateStatus(String message) {
+    if (!isConnected && message == _statusMessage) return;
     _statusMessage = message;
     notifyListeners();
   }
 }
+

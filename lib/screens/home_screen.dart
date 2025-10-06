@@ -4,15 +4,13 @@ import 'package:permission_handler/permission_handler.dart';
 
 import '../models/session.dart';
 import '../providers/ble_provider.dart';
-import '../providers/ble_provider_factory.dart';
-import '../providers/ble_provider_interface.dart';
 import '../providers/session_provider.dart';
 import '../widgets/app_drawer.dart';
 import '../widgets/eeg_chart.dart';
 import '../widgets/valence_chart.dart';
 import 'experiments_screen.dart';
 import 'session_summary_screen.dart';
-import 'stimulus_presentation_screen.dart'; // ★★★ 新しい画面をインポート ★★★
+import 'stimulus_presentation_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -34,22 +32,14 @@ class _HomeScreenState extends State<HomeScreen> {
     ].request();
   }
 
-  // ★★★ セッション開始時の選択肢を増やす ★★★
   void _showSessionTypeDialog() {
     final sessionProvider = context.read<SessionProvider>();
     final bleProvider = context.read<BleProvider>();
-    final connectedDeviceId = bleProvider.connectedDeviceId;
-    final clockOffsetInfo = bleProvider.lastClockOffsetInfo;
+    final connectedDeviceId = bleProvider.deviceId;
 
     if (connectedDeviceId == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text("デバイスIDが不明です。再接続してください。")),
-      );
-      return;
-    }
-    if (clockOffsetInfo == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("時刻同期が完了していません。")),
       );
       return;
     }
@@ -65,18 +55,18 @@ class _HomeScreenState extends State<HomeScreen> {
             ElevatedButton(
               child: const Text("アプリ内で刺激を提示"),
               onPressed: () {
-                Navigator.of(ctx).pop(); // ダイアログを閉じる
+                Navigator.of(ctx).pop();
                 _startInAppPresentationSession(
-                    sessionProvider, connectedDeviceId, clockOffsetInfo);
+                    sessionProvider, connectedDeviceId, {});
               },
             ),
             const SizedBox(height: 8),
             ElevatedButton(
               child: const Text("外部アプリで刺激を提示 (PsychoPyなど)"),
               onPressed: () {
-                Navigator.of(ctx).pop(); // ダイアログを閉じる
+                Navigator.of(ctx).pop();
                 _startExternalSession(
-                    sessionProvider, connectedDeviceId, clockOffsetInfo);
+                    sessionProvider, connectedDeviceId, {});
               },
             ),
           ],
@@ -85,7 +75,6 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // ★★★ アプリ内提示セッションを開始するロジック ★★★
   void _startInAppPresentationSession(SessionProvider sessionProvider,
       String deviceId, Map<String, dynamic> clockOffsetInfo) {
     showDialog(
@@ -128,7 +117,6 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // ★★★ 外部提示セッションを開始するロジック ★★★
   void _startExternalSession(SessionProvider sessionProvider, String deviceId,
       Map<String, dynamic> clockOffsetInfo) async {
     await sessionProvider.startSession(
@@ -136,59 +124,46 @@ class _HomeScreenState extends State<HomeScreen> {
       deviceId: deviceId,
       clockOffsetInfo: clockOffsetInfo,
     );
-    // 外部セッションの場合は刺激提示画面には遷移しない
   }
 
   @override
   Widget build(BuildContext context) {
-    final bleProviderFactory = context.watch<BleProviderFactory>();
+    final bleProvider = context.watch<BleProvider>();
     final sessionProvider = context.watch<SessionProvider>();
     final theme = Theme.of(context);
     
-    final currentProvider = bleProviderFactory.currentProvider;
-    
-    // デバッグ情報をログ出力
-    print("HomeScreen: build() called");
-    if (currentProvider != null) {
-      print("HomeScreen: currentProvider found (${currentProvider.runtimeType}), data length: ${currentProvider.displayData.length}");
-      print("HomeScreen: isConnected: ${currentProvider.isConnected}, channelCount: ${currentProvider.channelCount}");
-      
-      // MuseBleProviderの場合、バッファの状態を詳しく確認
-      if (currentProvider.runtimeType.toString().contains('MuseBleProvider')) {
-        print("HomeScreen: MuseBleProvider detected, checking internal state");
-      }
-    } else {
-      print("HomeScreen: currentProvider is null");
-    }
-
     return Scaffold(
       appBar: AppBar(
         title: const Text('EEG BIDS Collector'),
         actions: [
-          // デバイス選択ボタン
           PopupMenuButton<DeviceType>(
-            icon: const Icon(Icons.devices),
+            tooltip: "スキャンするデバイスを選択",
+            icon: const Icon(Icons.devices_other),
             onSelected: (deviceType) {
-              bleProviderFactory.switchProvider(deviceType);
+              if (bleProvider.isConnected) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text("まず現在のデバイスとの接続を解除してください。")),
+                  );
+                  return;
+              }
+              bleProvider.startScan(targetDeviceType: deviceType);
             },
             itemBuilder: (context) => [
               const PopupMenuItem(
-                value: DeviceType.esp32,
-                child: Text('ESP32デバイス'),
+                value: DeviceType.customEeg,
+                child: Text('自作脳波計 (ESP32)'),
               ),
               const PopupMenuItem(
                 value: DeviceType.muse2,
-                child: Text('Muse2デバイス'),
+                child: Text('Muse 2'),
               ),
             ],
           ),
           Padding(
             padding: const EdgeInsets.only(right: 8.0),
             child: Icon(
-              currentProvider?.isConnected == true
-                  ? Icons.bluetooth_connected
-                  : Icons.bluetooth_disabled,
-              color: currentProvider?.isConnected == true ? Colors.cyanAccent : Colors.grey,
+              bleProvider.isConnected ? Icons.bluetooth_connected : Icons.bluetooth_disabled,
+              color: bleProvider.isConnected ? Colors.cyanAccent : Colors.grey,
             ),
           )
         ],
@@ -216,47 +191,19 @@ class _HomeScreenState extends State<HomeScreen> {
             const SizedBox(height: 8),
             Expanded(
               flex: 3,
-              child: currentProvider != null
-                  ? Column(
-                      children: [
-                        // デバッグ情報を表示
-                        Container(
-                          padding: const EdgeInsets.all(8.0),
-                          color: Colors.grey[800],
-                          child: Column(
-                            children: [
-                              Text(
-                                'データ: ${currentProvider.displayData.length}点, チャンネル: ${currentProvider.channelCount}',
-                                style: const TextStyle(color: Colors.white, fontSize: 12),
-                              ),
-                              if (currentProvider.displayData.isNotEmpty)
-                                Text(
-                                  '最新データ: ${currentProvider.displayData.last.eegValues.take(4).toList()}',
-                                  style: const TextStyle(color: Colors.white, fontSize: 10),
-                                ),
-                            ],
-                          ),
-                        ),
-                        Expanded(
-                          child: EegMultiChannelChart(
-                            data: currentProvider.displayData,
-                            channelCount: currentProvider.channelCount,
-                            sampleRate: 256, // 両方のデバイスで256Hz
-                          ),
-                        ),
-                      ],
-                    )
-                  : const Center(child: Text('デバイスを選択してください')),
+              child: EegMultiChannelChart(
+                data: bleProvider.displayData,
+                channelCount: bleProvider.channelCount,
+                sampleRate: BleProvider.sampleRate,
+              ),
             ),
             const SizedBox(height: 8),
             Expanded(
               flex: 2,
-              child: currentProvider != null
-                  ? ValenceChart(data: currentProvider.valenceHistory)
-                  : const SizedBox.shrink(),
+              child: ValenceChart(data: bleProvider.valenceHistory),
             ),
             const SizedBox(height: 16),
-            _buildActionButton(context, currentProvider, sessionProvider),
+            _buildActionButton(context, bleProvider, sessionProvider),
             const SizedBox(height: 8),
           ],
         ),
@@ -265,18 +212,11 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _buildActionButton(
-      BuildContext context, BleProviderInterface? ble, SessionProvider session) {
-    if (ble == null) {
-      return const FloatingActionButton.extended(
-        onPressed: null,
-        label: Text("デバイスを選択してください"),
-        icon: Icon(Icons.devices),
-      );
-    }
+      BuildContext context, BleProvider ble, SessionProvider session) {
     
     if (!ble.isConnected) {
       return FloatingActionButton.extended(
-        onPressed: ble.startScan,
+        onPressed: () => ble.startScan(),
         label: const Text("デバイスをスキャン"),
         icon: const Icon(Icons.search),
       );
@@ -285,7 +225,6 @@ class _HomeScreenState extends State<HomeScreen> {
     if (session.isSessionRunning) {
       return FloatingActionButton.extended(
         onPressed: () {
-          // ★★★ 刺激提示画面からは直接終了させないので、このボタンは外部セッション用になる ★★★
           Navigator.of(context).pushReplacement(
             MaterialPageRoute(builder: (_) => const SessionSummaryScreen()),
           );
@@ -318,3 +257,4 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 }
+
