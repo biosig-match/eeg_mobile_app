@@ -11,6 +11,7 @@ import 'package:zstandard/zstandard.dart';
 import '../models/sensor_data.dart';
 import '../utils/config.dart';
 import 'auth_provider.dart';
+import 'ble_provider_interface.dart';
 
 // Isolateで実行するトップレベル関数 (変更なし)
 Future<DecodedPacket?> _decompressAndParseIsolate(
@@ -43,7 +44,7 @@ Future<DecodedPacket?> _decompressAndParseIsolate(
   return DecodedPacket(deviceId, points);
 }
 
-class BleProvider with ChangeNotifier {
+class BleProvider with ChangeNotifier implements BleProviderInterface {
   final ServerConfig _config;
   final AuthProvider _authProvider;
 
@@ -74,6 +75,8 @@ class BleProvider with ChangeNotifier {
   List<SensorDataPoint> get displayData => _dataBuffer;
   List<(DateTime, double)> get valenceHistory => _valenceHistory;
   String get timeSyncStatus => _timeSyncStatus;
+  String? get deviceId => connectedDeviceId;
+  int get channelCount => _dataBuffer.isNotEmpty ? _dataBuffer.first.eegValues.length : 8;
   // ★★★ 外部から時刻同期情報を取得するためのゲッター ★★★
   Map<String, dynamic>? get lastClockOffsetInfo => _lastClockOffsetInfo;
 
@@ -93,7 +96,7 @@ class BleProvider with ChangeNotifier {
     super.dispose();
   }
 
-  void startScan() {
+  Future<void> startScan() async {
     _updateStatus("デバイスをスキャン中...");
     FlutterBluePlus.startScan(timeout: const Duration(seconds: 5));
     FlutterBluePlus.scanResults.listen((results) {
@@ -291,11 +294,14 @@ class BleProvider with ChangeNotifier {
   }
 
   Future<void> _sendDataToCollector(Uint8List compressedPacket) async {
+    // 認証されていない場合は送信をスキップ
     if (!_authProvider.isAuthenticated) return;
-    final String payloadBase64 = base64Encode(compressedPacket);
-    final body = jsonEncode(
-        {'user_id': _authProvider.userId, 'payload_base64': payloadBase64});
+    
     try {
+      final String payloadBase64 = base64Encode(compressedPacket);
+      final body = jsonEncode(
+          {'user_id': _authProvider.userId, 'payload_base64': payloadBase64});
+      
       final url = Uri.parse('${_config.httpBaseUrl}/api/v1/data');
       await http
           .post(url,
@@ -304,9 +310,10 @@ class BleProvider with ChangeNotifier {
                 'X-User-Id': _authProvider.userId!
               },
               body: body)
-          .timeout(const Duration(seconds: 5));
+          .timeout(const Duration(seconds: 2)); // タイムアウトを短縮
     } catch (e) {
-      debugPrint('[HTTP] ❌ Error sending data to collector: $e');
+      // サーバー送信エラーは無視（リアルタイム表示に影響しない）
+      debugPrint('[HTTP] Server send failed (ignored): $e');
     }
   }
 

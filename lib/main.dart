@@ -5,6 +5,7 @@ import 'providers/analysis_provider.dart';
 import 'providers/auth_provider.dart';
 import 'providers/bids_provider.dart';
 import 'providers/ble_provider.dart';
+import 'providers/ble_provider_factory.dart';
 import 'providers/media_provider.dart';
 import 'providers/session_provider.dart';
 import 'providers/stimulus_provider.dart';
@@ -33,10 +34,10 @@ class MyApp extends StatelessWidget {
               SessionProvider(serverConfig, context.read<AuthProvider>()),
           update: (_, auth, previous) => SessionProvider(serverConfig, auth),
         ),
-        ChangeNotifierProxyProvider<AuthProvider, BleProvider>(
+        ChangeNotifierProxyProvider<AuthProvider, BleProviderFactory>(
           create: (context) =>
-              BleProvider(serverConfig, context.read<AuthProvider>()),
-          update: (_, auth, previous) => BleProvider(serverConfig, auth),
+              BleProviderFactory(serverConfig, context.read<AuthProvider>()),
+          update: (_, auth, previous) => BleProviderFactory(serverConfig, auth),
         ),
         ChangeNotifierProxyProvider<AuthProvider, AnalysisProvider>(
           create: (context) =>

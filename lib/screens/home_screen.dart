@@ -4,6 +4,8 @@ import 'package:permission_handler/permission_handler.dart';
 
 import '../models/session.dart';
 import '../providers/ble_provider.dart';
+import '../providers/ble_provider_factory.dart';
+import '../providers/ble_provider_interface.dart';
 import '../providers/session_provider.dart';
 import '../widgets/app_drawer.dart';
 import '../widgets/eeg_chart.dart';
@@ -139,21 +141,54 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final bleProvider = context.watch<BleProvider>();
+    final bleProviderFactory = context.watch<BleProviderFactory>();
     final sessionProvider = context.watch<SessionProvider>();
     final theme = Theme.of(context);
+    
+    final currentProvider = bleProviderFactory.currentProvider;
+    
+    // デバッグ情報をログ出力
+    print("HomeScreen: build() called");
+    if (currentProvider != null) {
+      print("HomeScreen: currentProvider found (${currentProvider.runtimeType}), data length: ${currentProvider.displayData.length}");
+      print("HomeScreen: isConnected: ${currentProvider.isConnected}, channelCount: ${currentProvider.channelCount}");
+      
+      // MuseBleProviderの場合、バッファの状態を詳しく確認
+      if (currentProvider.runtimeType.toString().contains('MuseBleProvider')) {
+        print("HomeScreen: MuseBleProvider detected, checking internal state");
+      }
+    } else {
+      print("HomeScreen: currentProvider is null");
+    }
 
     return Scaffold(
       appBar: AppBar(
         title: const Text('EEG BIDS Collector'),
         actions: [
+          // デバイス選択ボタン
+          PopupMenuButton<DeviceType>(
+            icon: const Icon(Icons.devices),
+            onSelected: (deviceType) {
+              bleProviderFactory.switchProvider(deviceType);
+            },
+            itemBuilder: (context) => [
+              const PopupMenuItem(
+                value: DeviceType.esp32,
+                child: Text('ESP32デバイス'),
+              ),
+              const PopupMenuItem(
+                value: DeviceType.muse2,
+                child: Text('Muse2デバイス'),
+              ),
+            ],
+          ),
           Padding(
             padding: const EdgeInsets.only(right: 8.0),
             child: Icon(
-              bleProvider.isConnected
+              currentProvider?.isConnected == true
                   ? Icons.bluetooth_connected
                   : Icons.bluetooth_disabled,
-              color: bleProvider.isConnected ? Colors.cyanAccent : Colors.grey,
+              color: currentProvider?.isConnected == true ? Colors.cyanAccent : Colors.grey,
             ),
           )
         ],
@@ -181,18 +216,47 @@ class _HomeScreenState extends State<HomeScreen> {
             const SizedBox(height: 8),
             Expanded(
               flex: 3,
-              child: EegMultiChannelChart(
-                data: bleProvider.displayData,
-                sampleRate: BleProvider.sampleRate,
-              ),
+              child: currentProvider != null
+                  ? Column(
+                      children: [
+                        // デバッグ情報を表示
+                        Container(
+                          padding: const EdgeInsets.all(8.0),
+                          color: Colors.grey[800],
+                          child: Column(
+                            children: [
+                              Text(
+                                'データ: ${currentProvider.displayData.length}点, チャンネル: ${currentProvider.channelCount}',
+                                style: const TextStyle(color: Colors.white, fontSize: 12),
+                              ),
+                              if (currentProvider.displayData.isNotEmpty)
+                                Text(
+                                  '最新データ: ${currentProvider.displayData.last.eegValues.take(4).toList()}',
+                                  style: const TextStyle(color: Colors.white, fontSize: 10),
+                                ),
+                            ],
+                          ),
+                        ),
+                        Expanded(
+                          child: EegMultiChannelChart(
+                            data: currentProvider.displayData,
+                            channelCount: currentProvider.channelCount,
+                            sampleRate: 256, // 両方のデバイスで256Hz
+                          ),
+                        ),
+                      ],
+                    )
+                  : const Center(child: Text('デバイスを選択してください')),
             ),
             const SizedBox(height: 8),
             Expanded(
               flex: 2,
-              child: ValenceChart(data: bleProvider.valenceHistory),
+              child: currentProvider != null
+                  ? ValenceChart(data: currentProvider.valenceHistory)
+                  : const SizedBox.shrink(),
             ),
             const SizedBox(height: 16),
-            _buildActionButton(context, bleProvider, sessionProvider),
+            _buildActionButton(context, currentProvider, sessionProvider),
             const SizedBox(height: 8),
           ],
         ),
@@ -201,7 +265,15 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _buildActionButton(
-      BuildContext context, BleProvider ble, SessionProvider session) {
+      BuildContext context, BleProviderInterface? ble, SessionProvider session) {
+    if (ble == null) {
+      return const FloatingActionButton.extended(
+        onPressed: null,
+        label: Text("デバイスを選択してください"),
+        icon: Icon(Icons.devices),
+      );
+    }
+    
     if (!ble.isConnected) {
       return FloatingActionButton.extended(
         onPressed: ble.startScan,

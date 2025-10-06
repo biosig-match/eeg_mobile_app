@@ -24,6 +24,12 @@ class EegMultiChannelChart extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // デバッグ情報を表示
+    print("EegMultiChannelChart: build() called, data.length=${data.length}, channelCount=$channelCount");
+    if (data.isNotEmpty) {
+      print("EegMultiChannelChart: First data point: ${data.first.eegValues.take(4).toList()}");
+    }
+    
     // データが空の場合は待機メッセージを表示
     if (data.isEmpty) {
       return Center(
@@ -34,7 +40,7 @@ class EegMultiChannelChart extends StatelessWidget {
             borderRadius: BorderRadius.circular(8),
             border: Border.all(color: Colors.white24),
           ),
-          child: const Text('受信待機中...'),
+          child: Text('受信待機中... (データ: ${data.length}点)'),
         ),
       );
     }
