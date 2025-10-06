@@ -17,6 +17,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "2.13.0"
+  bitstream:
+    dependency: "direct main"
+    description:
+      name: bitstream
+      sha256: "19a6b9f2d148010ae0c4149294cb1ad89cc212af961956dc4d2e931e0eadf963"
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.1.0"
   bluez:
     dependency: transitive
     description:
@@ -97,6 +105,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "1.19.1"
+  convert:
+    dependency: transitive
+    description:
+      name: convert
+      sha256: b30acd5944035672bc15c6b7a8b47d773e41e2f17de064350988c5d02adb1c68
+      url: "https://pub.dev"
+    source: hosted
+    version: "3.1.2"
   cross_file:
     dependency: transitive
     description:

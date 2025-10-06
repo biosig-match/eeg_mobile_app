@@ -50,7 +50,6 @@ class MyApp extends StatelessWidget {
           update: (_, auth, session, previous) =>
               MediaProvider(serverConfig, auth, session),
         ),
-        // ★★★ 新しいProviderを登録 ★★★
         ChangeNotifierProxyProvider<AuthProvider, StimulusProvider>(
           create: (context) =>
               StimulusProvider(serverConfig, context.read<AuthProvider>()),

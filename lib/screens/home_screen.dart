@@ -10,7 +10,7 @@ import '../widgets/eeg_chart.dart';
 import '../widgets/valence_chart.dart';
 import 'experiments_screen.dart';
 import 'session_summary_screen.dart';
-import 'stimulus_presentation_screen.dart'; // ★★★ 新しい画面をインポート ★★★
+import 'stimulus_presentation_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -32,22 +32,14 @@ class _HomeScreenState extends State<HomeScreen> {
     ].request();
   }
 
-  // ★★★ セッション開始時の選択肢を増やす ★★★
   void _showSessionTypeDialog() {
     final sessionProvider = context.read<SessionProvider>();
     final bleProvider = context.read<BleProvider>();
-    final connectedDeviceId = bleProvider.connectedDeviceId;
-    final clockOffsetInfo = bleProvider.lastClockOffsetInfo;
+    final connectedDeviceId = bleProvider.deviceId;
 
     if (connectedDeviceId == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text("デバイスIDが不明です。再接続してください。")),
-      );
-      return;
-    }
-    if (clockOffsetInfo == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("時刻同期が完了していません。")),
       );
       return;
     }
@@ -63,18 +55,18 @@ class _HomeScreenState extends State<HomeScreen> {
             ElevatedButton(
               child: const Text("アプリ内で刺激を提示"),
               onPressed: () {
-                Navigator.of(ctx).pop(); // ダイアログを閉じる
+                Navigator.of(ctx).pop();
                 _startInAppPresentationSession(
-                    sessionProvider, connectedDeviceId, clockOffsetInfo);
+                    sessionProvider, connectedDeviceId, {});
               },
             ),
             const SizedBox(height: 8),
             ElevatedButton(
               child: const Text("外部アプリで刺激を提示 (PsychoPyなど)"),
               onPressed: () {
-                Navigator.of(ctx).pop(); // ダイアログを閉じる
+                Navigator.of(ctx).pop();
                 _startExternalSession(
-                    sessionProvider, connectedDeviceId, clockOffsetInfo);
+                    sessionProvider, connectedDeviceId, {});
               },
             ),
           ],
@@ -83,7 +75,6 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // ★★★ アプリ内提示セッションを開始するロジック ★★★
   void _startInAppPresentationSession(SessionProvider sessionProvider,
       String deviceId, Map<String, dynamic> clockOffsetInfo) {
     showDialog(
@@ -126,7 +117,6 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // ★★★ 外部提示セッションを開始するロジック ★★★
   void _startExternalSession(SessionProvider sessionProvider, String deviceId,
       Map<String, dynamic> clockOffsetInfo) async {
     await sessionProvider.startSession(
@@ -134,7 +124,6 @@ class _HomeScreenState extends State<HomeScreen> {
       deviceId: deviceId,
       clockOffsetInfo: clockOffsetInfo,
     );
-    // 外部セッションの場合は刺激提示画面には遷移しない
   }
 
   @override
@@ -142,17 +131,38 @@ class _HomeScreenState extends State<HomeScreen> {
     final bleProvider = context.watch<BleProvider>();
     final sessionProvider = context.watch<SessionProvider>();
     final theme = Theme.of(context);
-
+    
     return Scaffold(
       appBar: AppBar(
         title: const Text('EEG BIDS Collector'),
         actions: [
+          PopupMenuButton<DeviceType>(
+            tooltip: "スキャンするデバイスを選択",
+            icon: const Icon(Icons.devices_other),
+            onSelected: (deviceType) {
+              if (bleProvider.isConnected) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text("まず現在のデバイスとの接続を解除してください。")),
+                  );
+                  return;
+              }
+              bleProvider.startScan(targetDeviceType: deviceType);
+            },
+            itemBuilder: (context) => [
+              const PopupMenuItem(
+                value: DeviceType.customEeg,
+                child: Text('自作脳波計 (ESP32)'),
+              ),
+              const PopupMenuItem(
+                value: DeviceType.muse2,
+                child: Text('Muse 2'),
+              ),
+            ],
+          ),
           Padding(
             padding: const EdgeInsets.only(right: 8.0),
             child: Icon(
-              bleProvider.isConnected
-                  ? Icons.bluetooth_connected
-                  : Icons.bluetooth_disabled,
+              bleProvider.isConnected ? Icons.bluetooth_connected : Icons.bluetooth_disabled,
               color: bleProvider.isConnected ? Colors.cyanAccent : Colors.grey,
             ),
           )
@@ -183,6 +193,7 @@ class _HomeScreenState extends State<HomeScreen> {
               flex: 3,
               child: EegMultiChannelChart(
                 data: bleProvider.displayData,
+                channelCount: bleProvider.channelCount,
                 sampleRate: BleProvider.sampleRate,
               ),
             ),
@@ -202,9 +213,10 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Widget _buildActionButton(
       BuildContext context, BleProvider ble, SessionProvider session) {
+    
     if (!ble.isConnected) {
       return FloatingActionButton.extended(
-        onPressed: ble.startScan,
+        onPressed: () => ble.startScan(),
         label: const Text("デバイスをスキャン"),
         icon: const Icon(Icons.search),
       );
@@ -213,7 +225,6 @@ class _HomeScreenState extends State<HomeScreen> {
     if (session.isSessionRunning) {
       return FloatingActionButton.extended(
         onPressed: () {
-          // ★★★ 刺激提示画面からは直接終了させないので、このボタンは外部セッション用になる ★★★
           Navigator.of(context).pushReplacement(
             MaterialPageRoute(builder: (_) => const SessionSummaryScreen()),
           );
@@ -246,3 +257,4 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 }
+
