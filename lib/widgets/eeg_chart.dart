@@ -258,6 +258,8 @@ class _SingleChannelChart extends StatelessWidget {
           // === その他 ===
           lineTouchData: const LineTouchData(enabled: false),
         ),
+        // アニメーションを無効化
+        duration: Duration.zero,
       ),
     );
   }
