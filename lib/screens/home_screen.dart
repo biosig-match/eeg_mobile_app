@@ -169,11 +169,13 @@ class _HomeScreenState extends State<HomeScreen> {
         ],
       ),
       drawer: const AppDrawer(),
-      body: Padding(
-        padding: const EdgeInsets.all(8.0),
-        child: Column(
-          children: [
-            Card(
+      body: Stack(
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(8.0),
+            child: Column(
+              children: [
+                Card(
               child: ListTile(
                 leading: const Icon(Icons.science_outlined),
                 title: Text(sessionProvider.selectedExperiment.name),
@@ -197,16 +199,20 @@ class _HomeScreenState extends State<HomeScreen> {
                 sampleRate: BleProvider.sampleRate,
               ),
             ),
-            const SizedBox(height: 8),
-            Expanded(
-              flex: 2,
-              child: ValenceChart(data: bleProvider.valenceHistory),
-            ),
             const SizedBox(height: 16),
             _buildActionButton(context, bleProvider, sessionProvider),
             const SizedBox(height: 8),
           ],
-        ),
+            ),
+          ),
+          // 画面下にオーバーレイする快不快パネル（通常は非表示，^で表示）
+          Positioned.fill(
+            child: IgnorePointer(
+              ignoring: false,
+              child: ValencePanel(data: bleProvider.valenceHistory),
+            ),
+          ),
+        ],
       ),
     );
   }

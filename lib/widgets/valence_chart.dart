@@ -147,6 +147,76 @@ class ValenceChart extends StatelessWidget {
           ),
         ],
       ),
+      duration: Duration.zero,
+    );
+  }
+}
+
+/// 画面下部からスライドで表示/非表示を切り替えられる快不快パネル。
+/// 表示トグルは右上の ^ ボタン。
+class ValencePanel extends StatefulWidget {
+  final List<(DateTime, double)> data;
+
+  const ValencePanel({super.key, required this.data});
+
+  @override
+  State<ValencePanel> createState() => _ValencePanelState();
+}
+
+class _ValencePanelState extends State<ValencePanel> with SingleTickerProviderStateMixin {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    return Stack(
+      children: [
+        // スライドインするパネル本体
+        Align(
+          alignment: Alignment.bottomCenter,
+          child: AnimatedSlide(
+            duration: const Duration(milliseconds: 250),
+            curve: Curves.easeOutCubic,
+            offset: _expanded ? Offset.zero : const Offset(0, 1),
+            child: Material(
+              color: Colors.transparent,
+              child: Container(
+                margin: const EdgeInsets.only(left: 8, right: 8, bottom: 8),
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: const Color(0xff1b242e),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.white24),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.3),
+                      blurRadius: 8,
+                      offset: const Offset(0, 2),
+                    )
+                  ],
+                ),
+                height: 180,
+                child: ValenceChart(data: widget.data),
+              ),
+            ),
+          ),
+        ),
+
+        // トグルボタン（常に右下に表示）
+        Align(
+          alignment: Alignment.bottomRight,
+          child: Padding(
+            padding: const EdgeInsets.only(right: 12, bottom: 12),
+            child: FloatingActionButton.small(
+              heroTag: 'valence_toggle',
+              backgroundColor: theme.colorScheme.primary.withOpacity(0.85),
+              onPressed: () => setState(() => _expanded = !_expanded),
+              child: Icon(_expanded ? Icons.keyboard_arrow_down : Icons.keyboard_arrow_up),
+            ),
+          ),
+        ),
+      ],
     );
   }
 }
