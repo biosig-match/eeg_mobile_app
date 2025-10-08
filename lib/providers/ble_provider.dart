@@ -365,16 +365,24 @@ class BleProvider with ChangeNotifier implements BleProviderInterface {
             debugPrint("[Muse] Packet loss! prev: $_museLastPacketIndex, current: $packetIndex");
         }
         _museLastPacketIndex = packetIndex;
+        const double microVoltPerLsb12bit = 0.48828125; // 12bit LSB換算(µV/LSB)
+        const double center12bit = 2048.0;
         final newPoints = <SensorDataPoint>[];
         for (int i = 0; i < 12; i++) {
+            // 4ch分のサンプルを抽出
+            final ch0 = _museEegBuffer[0].isNotEmpty ? _museEegBuffer[0][i] : 0;
+            final ch1 = _museEegBuffer[1].isNotEmpty ? _museEegBuffer[1][i] : 0;
+            final ch2 = _museEegBuffer[2].isNotEmpty ? _museEegBuffer[2][i] : 0;
+            final ch3 = _museEegBuffer[3].isNotEmpty ? _museEegBuffer[3][i] : 0;
+            final eegRaw = [ch0, ch1, ch2, ch3];
+            final eegUv = eegRaw
+                .map((v) => (v.toDouble() - center12bit) * microVoltPerLsb12bit)
+                .toList(growable: false);
+
             newPoints.add(SensorDataPoint(
                 sampleIndex: _museSampleIndexCounter++,
-                eegValues: [
-                  _museEegBuffer[0].isNotEmpty ? _museEegBuffer[0][i] : 0,
-                  _museEegBuffer[1].isNotEmpty ? _museEegBuffer[1][i] : 0,
-                  _museEegBuffer[2].isNotEmpty ? _museEegBuffer[2][i] : 0,
-                  _museEegBuffer[3].isNotEmpty ? _museEegBuffer[3][i] : 0,
-                ],
+                eegValues: eegRaw,
+                eegMicroVolts: eegUv,
                 accel: [0, 0, 0],
                 gyro: [0, 0, 0],
                 triggerState: 0,

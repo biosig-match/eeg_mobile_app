@@ -85,19 +85,22 @@ class _SingleChannelChart extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // --- 縦軸の動的スケーリング処理 ---
-    double maxAbsValue = 0.0;
-    if (data.isNotEmpty) {
-      // このチャンネルのデータから、中心(2048)からの振幅の絶対値の最大を求める
-      final values = data
-          .where((p) => channelIndex < p.eegValues.length)
-          .map((p) => (p.eegValues[channelIndex].toDouble() - 2048).abs());
-      if (values.isNotEmpty) {
-        maxAbsValue = values.reduce(max);
+    // フォールバック用の12bitスケール（Muse既定）。受信時にµVへ変換済みの場合はそちらを優先。
+    const double microVoltPerLsb12bit = 0.48828125;
+    const double center12bit = 2048.0;
+    const double yMin = -100.0;
+    const double yMax = 100.0;
+
+    double? yMicroVolts(SensorDataPoint p) {
+      if (p.eegMicroVolts != null && channelIndex < p.eegMicroVolts!.length) {
+        return p.eegMicroVolts![channelIndex];
       }
+      if (channelIndex < p.eegValues.length) {
+        return (p.eegValues[channelIndex].toDouble() - center12bit) * microVoltPerLsb12bit;
+      }
+      return null;
     }
-    // 最小の表示範囲を100に設定し、現在の最大振幅値に15%の余裕を持たせる
-    final double verticalRange = max(100.0, maxAbsValue * 1.15);
+    // Y範囲は固定（-100〜100 µV）
 
     return Container(
       padding: const EdgeInsets.only(top: 16, right: 16, bottom: 8),
@@ -117,16 +120,13 @@ class _SingleChannelChart extends StatelessWidget {
                     final index = entry.key;
                     final point = entry.value;
 
-                    if (channelIndex >= point.eegValues.length) {
-                      return FlSpot.nullSpot;
-                    }
-                    // Y座標は、値から中央値を引いたもの
-                    final yValue =
-                        point.eegValues[channelIndex].toDouble() - 2048;
+                    final y = yMicroVolts(point);
+                    if (y == null) return FlSpot.nullSpot;
+                    final double yClamped = y < yMin ? yMin : (y > yMax ? yMax : y);
 
                     return FlSpot(
                       index.toDouble(), // X座標はデータのインデックス
-                      yValue,
+                      yClamped,
                     );
                   })
                   .where((spot) => spot != FlSpot.nullSpot)
@@ -141,8 +141,8 @@ class _SingleChannelChart extends StatelessWidget {
           // === 軸範囲 ===
           minX: 0,
           maxX: (data.length - 1).toDouble(),
-          minY: -verticalRange, // 計算した動的な範囲を設定
-          maxY: verticalRange, // 計算した動的な範囲を設定
+          minY: yMin,
+          maxY: yMax,
 
           // === グリッド線 ===
           gridData: FlGridData(
@@ -231,7 +231,7 @@ class _SingleChannelChart extends StatelessWidget {
               sideTitles: SideTitles(
                 showTitles: true,
                 reservedSize: 50.0,
-                interval: verticalRange, // スケールの上端と下端に目盛り
+                interval: yMax, // -100, 0, 100 の位置に目盛り（0は非表示）
                 getTitlesWidget: (value, meta) {
                   // 0の目盛りは左軸とかぶるので表示しない
                   if (value == 0) {
@@ -240,7 +240,7 @@ class _SingleChannelChart extends StatelessWidget {
                   return SideTitleWidget(
                     axisSide: meta.axisSide,
                     space: 4.0,
-                    child: Text(value.toStringAsFixed(0),
+                    child: Text('${value.toStringAsFixed(0)} µV',
                         style:
                             TextStyle(color: Colors.grey[400], fontSize: 10.0)),
                   );
