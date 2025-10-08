@@ -30,16 +30,17 @@ class _EegMultiChannelChartState extends State<EegMultiChannelChart> {
   // チャンネルごとにボタン押下時の最小最大を固定保持
   final Map<int, (double, double)> _lockedRanges = {};
 
-  /// 現在の表示バッファを走査して、各チャンネルの生値(µV)の
-  /// 最小最大を求め、5%（最低±1µV）の余白を付けて固定する。
   void _fitRanges() {
     if (widget.data.isEmpty) return;
-    const double microVoltPerLsb12bit = 0.48828125;
-    const double center12bit = 2048.0;
+
+    // ADS1299用の変換係数を定義 (Vref=4.5V, Gain=24, 24bitADCを16bitで利用)
+    // LSB(16bit) = (Vref / Gain) / (2^23) * 2^8  [V]
+    const double ads1299MicroVoltsPerLsb = (4.5 / 24.0) * 256.0 / 8388608.0 * 1000000.0;
+
     // データが存在する最大チャンネル数を推定
     int maxChannelsInData = 0;
     for (final p in widget.data) {
-      final len = p.eegMicroVolts != null ? p.eegMicroVolts!.length : p.eegValues.length;
+      final len = p.eegMicroVolts?.length ?? p.eegValues.length;
       if (len > maxChannelsInData) maxChannelsInData = len;
     }
 
@@ -51,13 +52,16 @@ class _EegMultiChannelChartState extends State<EegMultiChannelChart> {
       for (final p in widget.data) {
         double? y;
         if (p.eegMicroVolts != null && ch < p.eegMicroVolts!.length) {
+          // 既にμVに変換されているデータ (Muse2など)
           y = p.eegMicroVolts![ch];
         } else if (ch < p.eegValues.length) {
-          y = (p.eegValues[ch].toDouble() - center12bit) * microVoltPerLsb12bit;
+          // 生データからμVに変換 (ADS1299を想定)
+          // ADS1299は符号付き16bitなので、オフセットなしで係数を掛ける
+          y = p.eegValues[ch].toDouble() * ads1299MicroVoltsPerLsb;
         }
         if (y == null) continue;
-        localMin = (localMin == null) ? y : (y < localMin ? y : localMin);
-        localMax = (localMax == null) ? y : (y > localMax ? y : localMax);
+        localMin = (localMin == null) ? y : min(y, localMin);
+        localMax = (localMax == null) ? y : max(y, localMax);
       }
       if (localMin != null && localMax != null) {
         // クランプ前の生データでの範囲に，視認性のため5%（最低±1µV）の余白を追加
@@ -131,7 +135,7 @@ class _EegMultiChannelChartState extends State<EegMultiChannelChart> {
 }
 
 /// 単一チャンネルのEEG可視化。
-/// - y値は受信時に変換済みのµVがあればそれを採用、なければ12bit換算にフォールバック。
+/// - y値は受信時に変換済みのµVがあればそれを採用、なければADS1299用の16bit換算にフォールバック。
 /// - yレンジは親からロックされた値があればそれを使用、無ければ既定±100µV。
 class _SingleChannelChart extends StatelessWidget {
   final List<SensorDataPoint> data;
@@ -152,22 +156,11 @@ class _SingleChannelChart extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // フォールバック用の12bitスケール（Muse既定）。受信時にµVへ変換済みの場合はそちらを優先。
-    const double microVoltPerLsb12bit = 0.48828125;
-    const double center12bit = 2048.0;
+    // ADS1299用の変換係数
+    const double ads1299MicroVoltsPerLsb = (4.5 / 24.0) * 256.0 / 8388608.0 * 1000000.0; // 約 5.722
     const double defaultYMin = -100.0;
     const double defaultYMax = 100.0;
 
-    // 一点のy(µV)を取得。µVが未設定なら12bit生値から換算。
-    double? yMicroVolts(SensorDataPoint p) {
-      if (p.eegMicroVolts != null && channelIndex < p.eegMicroVolts!.length) {
-        return p.eegMicroVolts![channelIndex];
-      }
-      if (channelIndex < p.eegValues.length) {
-        return (p.eegValues[channelIndex].toDouble() - center12bit) * microVoltPerLsb12bit;
-      }
-      return null;
-    }
     // ボタン押下時に固定された範囲があればそれを使用、無ければ既定。
     final double yMin = yMinLocked ?? defaultYMin;
     final double yMax = yMaxLocked ?? defaultYMax;
@@ -190,10 +183,18 @@ class _SingleChannelChart extends StatelessWidget {
                     final index = entry.key;
                     final point = entry.value;
 
-                    final y = yMicroVolts(point);
+                    double? y;
+                    if (point.eegMicroVolts != null && channelIndex < point.eegMicroVolts!.length) {
+                      // 変換済みデータ (Muse2など)
+                      y = point.eegMicroVolts![channelIndex];
+                    } else if (channelIndex < point.eegValues.length) {
+                      // 生データから変換 (ADS1299を想定)
+                      y = point.eegValues[channelIndex].toDouble() * ads1299MicroVoltsPerLsb;
+                    }
+
                     if (y == null) return FlSpot.nullSpot;
                     // 表示は視認性のためにレンジ内へクランプ
-                    final double yClamped = y < yMin ? yMin : (y > yMax ? yMax : y);
+                    final double yClamped = y.clamp(yMin, yMax);
 
                     return FlSpot(
                       index.toDouble(), // X座標はデータのインデックス
