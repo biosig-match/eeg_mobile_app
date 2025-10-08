@@ -3,9 +3,10 @@ import 'package:flutter/material.dart';
 import 'dart:math';
 import '../models/sensor_data.dart';
 
-/// 複数のEEGチャンネルデータを、チャンネルごとに分離されたスクロール可能な
-/// グラフリストとして表示するウィジェットです。
-class EegMultiChannelChart extends StatelessWidget {
+/// 複数チャンネルのEEGを縦に並べて表示する。
+/// 右上の「範囲フィット」ボタンで、現時点のバッファ最小最大を
+/// チャンネルごとに固定レンジとして適用する（スナップショット方式）。
+class EegMultiChannelChart extends StatefulWidget {
   /// 表示するセンサーデータのリスト
   final List<SensorDataPoint> data;
 
@@ -21,17 +22,61 @@ class EegMultiChannelChart extends StatelessWidget {
     this.channelCount = 8,
     required this.sampleRate,
   });
+  @override
+  State<EegMultiChannelChart> createState() => _EegMultiChannelChartState();
+}
+
+class _EegMultiChannelChartState extends State<EegMultiChannelChart> {
+  // チャンネルごとにボタン押下時の最小最大を固定保持
+  final Map<int, (double, double)> _lockedRanges = {};
+
+  /// 現在の表示バッファを走査して、各チャンネルの生値(µV)の
+  /// 最小最大を求め、5%（最低±1µV）の余白を付けて固定する。
+  void _fitRanges() {
+    if (widget.data.isEmpty) return;
+    const double microVoltPerLsb12bit = 0.48828125;
+    const double center12bit = 2048.0;
+    // データが存在する最大チャンネル数を推定
+    int maxChannelsInData = 0;
+    for (final p in widget.data) {
+      final len = p.eegMicroVolts != null ? p.eegMicroVolts!.length : p.eegValues.length;
+      if (len > maxChannelsInData) maxChannelsInData = len;
+    }
+
+    final int channelsToProcess = min(widget.channelCount, maxChannelsInData);
+    final Map<int, (double, double)> next = {};
+    for (int ch = 0; ch < channelsToProcess; ch++) {
+      double? localMin;
+      double? localMax;
+      for (final p in widget.data) {
+        double? y;
+        if (p.eegMicroVolts != null && ch < p.eegMicroVolts!.length) {
+          y = p.eegMicroVolts![ch];
+        } else if (ch < p.eegValues.length) {
+          y = (p.eegValues[ch].toDouble() - center12bit) * microVoltPerLsb12bit;
+        }
+        if (y == null) continue;
+        localMin = (localMin == null) ? y : (y < localMin ? y : localMin);
+        localMax = (localMax == null) ? y : (y > localMax ? y : localMax);
+      }
+      if (localMin != null && localMax != null) {
+        // クランプ前の生データでの範囲に，視認性のため5%（最低±1µV）の余白を追加
+        final double span = (localMax - localMin).abs();
+        final double pad = span > 0 ? max(1.0, span * 0.05) : 1.0;
+        next[ch] = (localMin - pad, localMax + pad);
+      }
+    }
+    setState(() {
+      _lockedRanges
+        ..clear()
+        ..addAll(next);
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
-    // デバッグ情報を表示
-    print("EegMultiChannelChart: build() called, data.length=${data.length}, channelCount=$channelCount");
-    if (data.isNotEmpty) {
-      print("EegMultiChannelChart: First data point: ${data.first.eegValues.take(4).toList()}");
-    }
-    
     // データが空の場合は待機メッセージを表示
-    if (data.isEmpty) {
+    if (widget.data.isEmpty) {
       return Center(
         child: Container(
           padding: const EdgeInsets.all(16.0),
@@ -40,46 +85,68 @@ class EegMultiChannelChart extends StatelessWidget {
             borderRadius: BorderRadius.circular(8),
             border: Border.all(color: Colors.white24),
           ),
-          child: Text('受信待機中... (データ: ${data.length}点)'),
+          child: Text('受信待機中... (データ: ${widget.data.length}点)'),
         ),
       );
     }
 
-    // 各チャンネルのグラフを縦に並べてスクロール可能にする
-    return ListView.builder(
-      itemCount: channelCount,
-      itemBuilder: (context, index) {
-        // 各チャンネルのグラフウィジェットを生成
-        return Padding(
-          // グラフ間のスペース
-          padding: const EdgeInsets.only(bottom: 8.0),
-          child: SizedBox(
-            height: 110, // 各グラフの描画エリアの高さは固定
-            child: _SingleChannelChart(
-              data: data,
-              sampleRate: sampleRate,
-              channelIndex: index,
-              // すべてのグラフに横軸の目盛りを表示する
-              showBottomTitles: true,
+    return Column(
+      children: [
+        Align(
+          alignment: Alignment.centerRight,
+          child: Padding(
+            padding: const EdgeInsets.only(bottom: 6.0),
+            child: OutlinedButton.icon(
+              onPressed: _fitRanges,
+              icon: const Icon(Icons.fullscreen, size: 16),
+              label: const Text('範囲フィット'),
+              style: OutlinedButton.styleFrom(minimumSize: const Size(0, 32), visualDensity: VisualDensity.compact),
             ),
           ),
-        );
-      },
+        ),
+        Expanded(
+          child: ListView.builder(
+            itemCount: widget.channelCount,
+            itemBuilder: (context, index) {
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 4.0),
+                child: SizedBox(
+                  height: 160,
+                  child: _SingleChannelChart(
+                    data: widget.data,
+                    sampleRate: widget.sampleRate,
+                    channelIndex: index,
+                    yMinLocked: _lockedRanges[index]?.$1,
+                    yMaxLocked: _lockedRanges[index]?.$2,
+                    showBottomTitles: true,
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+      ],
     );
   }
 }
 
-/// 単一チャンネルのEEGデータを表示するためのプライベートウィジェット
+/// 単一チャンネルのEEG可視化。
+/// - y値は受信時に変換済みのµVがあればそれを採用、なければ12bit換算にフォールバック。
+/// - yレンジは親からロックされた値があればそれを使用、無ければ既定±100µV。
 class _SingleChannelChart extends StatelessWidget {
   final List<SensorDataPoint> data;
   final int sampleRate;
   final int channelIndex;
   final bool showBottomTitles;
+  final double? yMinLocked;
+  final double? yMaxLocked;
 
   const _SingleChannelChart({
     required this.data,
     required this.sampleRate,
     required this.channelIndex,
+    required this.yMinLocked,
+    required this.yMaxLocked,
     required this.showBottomTitles,
   });
 
@@ -88,9 +155,10 @@ class _SingleChannelChart extends StatelessWidget {
     // フォールバック用の12bitスケール（Muse既定）。受信時にµVへ変換済みの場合はそちらを優先。
     const double microVoltPerLsb12bit = 0.48828125;
     const double center12bit = 2048.0;
-    const double yMin = -100.0;
-    const double yMax = 100.0;
+    const double defaultYMin = -100.0;
+    const double defaultYMax = 100.0;
 
+    // 一点のy(µV)を取得。µVが未設定なら12bit生値から換算。
     double? yMicroVolts(SensorDataPoint p) {
       if (p.eegMicroVolts != null && channelIndex < p.eegMicroVolts!.length) {
         return p.eegMicroVolts![channelIndex];
@@ -100,7 +168,9 @@ class _SingleChannelChart extends StatelessWidget {
       }
       return null;
     }
-    // Y範囲は固定（-100〜100 µV）
+    // ボタン押下時に固定された範囲があればそれを使用、無ければ既定。
+    final double yMin = yMinLocked ?? defaultYMin;
+    final double yMax = yMaxLocked ?? defaultYMax;
 
     return Container(
       padding: const EdgeInsets.only(top: 16, right: 16, bottom: 8),
@@ -122,6 +192,7 @@ class _SingleChannelChart extends StatelessWidget {
 
                     final y = yMicroVolts(point);
                     if (y == null) return FlSpot.nullSpot;
+                    // 表示は視認性のためにレンジ内へクランプ
                     final double yClamped = y < yMin ? yMin : (y > yMax ? yMax : y);
 
                     return FlSpot(
@@ -231,7 +302,8 @@ class _SingleChannelChart extends StatelessWidget {
               sideTitles: SideTitles(
                 showTitles: true,
                 reservedSize: 50.0,
-                interval: yMax, // -100, 0, 100 の位置に目盛り（0は非表示）
+                // 上下端に1本（0は非表示）
+                interval: (yMax - yMin).abs(),
                 getTitlesWidget: (value, meta) {
                   // 0の目盛りは左軸とかぶるので表示しない
                   if (value == 0) {
