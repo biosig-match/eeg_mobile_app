@@ -17,8 +17,25 @@ enum DeviceType { customEeg, muse2, unknown }
 
 class ElectrodeConfig {
   final String name;
-  final int type;
+  final int type; // 0:EEG, 3:TRIG etc.
   ElectrodeConfig({required this.name, required this.type});
+}
+
+/// デバイス固有の物理パラメータを管理するクラス
+class DeviceProfile {
+  final double samplingRate;
+  final double lsbToVolts;
+  final List<ElectrodeConfig> electrodeConfigs;
+  final int eegChannelCount; // 物理的なEEGチャンネル数
+
+  DeviceProfile({
+    required this.samplingRate,
+    required this.lsbToVolts,
+    required this.electrodeConfigs,
+    required this.eegChannelCount,
+  });
+
+  double get lsbToMicrovolts => lsbToVolts * 1e6;
 }
 
 class BleProvider with ChangeNotifier implements BleProviderInterface {
@@ -28,7 +45,7 @@ class BleProvider with ChangeNotifier implements BleProviderInterface {
   // --- BLE関連 ---
   BluetoothDevice? _targetDevice;
   DeviceType _deviceType = DeviceType.unknown;
-  List<StreamSubscription> _valueSubscriptions = [];
+  final List<StreamSubscription> _valueSubscriptions = [];
   StreamSubscription<BluetoothConnectionState>? _connectionStateSubscription;
   StreamSubscription<List<ScanResult>>? _scanSubscription;
   BluetoothCharacteristic? _rxCharacteristic;
@@ -36,17 +53,16 @@ class BleProvider with ChangeNotifier implements BleProviderInterface {
   String _statusMessage = "未接続";
 
   // --- デバイス設定 ---
-  List<ElectrodeConfig> _electrodeConfigs = [];
-  int _eegChannelCount = 0; // 物理的に有効なチャンネル数 (e.g., ADS1299-4なら4, Museなら4)
+  DeviceProfile? _deviceProfile;
 
   // --- Muse 2 関連 ---
   static const museControlCharUuid = "273E0001-4C4D-454D-96BE-F03BAC821358";
   static const eegCharUuids = [
-    "273E0003-4C4D-454D-96BE-F03BAC821358",
-    "273E0004-4C4D-454D-96BE-F03BAC821358",
-    "273E0005-4C4D-454D-96BE-F03BAC821358",
-    "273E0006-4C4D-454D-96BE-F03BAC821358",
-    "273E0007-4C4D-454D-96BE-F03BAC821358",
+    "273E0003-4C4D-454D-96BE-F03BAC821358", // TP9
+    "273E0004-4C4D-454D-96BE-F03BAC821358", // AF7
+    "273E0005-4C4D-454D-96BE-F03BAC821358", // AF8
+    "273E0006-4C4D-454D-96BE-F03BAC821358", // TP10
+    "273E0007-4C4D-454D-96BE-F03BAC821358", // AUX
   ];
   final Map<String, int> _museUuidToIndex = {};
   final List<List<int>> _museEegBuffer = List.generate(5, (_) => []);
@@ -54,7 +70,7 @@ class BleProvider with ChangeNotifier implements BleProviderInterface {
   int _museSampleIndexCounter = 0;
 
   // --- データバッファリング ---
-  static const int sampleRate = 250;
+  static const int sampleRate = 250; // これはUI表示用の固定値
   static const double timeWindowSec = 5.0;
   static final int displayBufferSize = (sampleRate * timeWindowSec).toInt();
   final List<SensorDataPoint> _displayDataBuffer = [];
@@ -65,10 +81,7 @@ class BleProvider with ChangeNotifier implements BleProviderInterface {
   // --- UI更新 ---
   bool _needsUiUpdate = false;
   Timer? _uiUpdateTimer;
-
-  // --- スキャン状態管理 ---
   Timer? _scanTimeoutTimer;
-
   DateTime? _lastPayloadLogTime;
 
   // --- ゲッター ---
@@ -83,8 +96,9 @@ class BleProvider with ChangeNotifier implements BleProviderInterface {
   @override
   String? get deviceId => _targetDevice?.remoteId.str;
   @override
-  int get channelCount => _eegChannelCount;
+  int get channelCount => _deviceProfile?.eegChannelCount ?? 0;
   DeviceType get deviceType => _deviceType;
+  DeviceProfile? get deviceProfile => _deviceProfile;
 
   BleProvider(this._config, this._authProvider) {
     _uiUpdateTimer = Timer.periodic(const Duration(milliseconds: 16), (timer) {
@@ -218,11 +232,12 @@ class BleProvider with ChangeNotifier implements BleProviderInterface {
             "6E400001-B5A3-F393-E0A9-E50E24DCCA9E") {
           for (var char in service.characteristics) {
             if (char.uuid.toString().toUpperCase() ==
-                "6E400003-B5A3-F393-E0A9-E50E24DCCA9E")
+                "6E400003-B5A3-F393-E0A9-E50E24DCCA9E") {
               txChar = char;
-            else if (char.uuid.toString().toUpperCase() ==
-                "6E400002-B5A3-F393-E0A9-E50E24DCCA9E")
+            } else if (char.uuid.toString().toUpperCase() ==
+                "6E400002-B5A3-F393-E0A9-E50E24DCCA9E") {
               _rxCharacteristic = char;
+            }
           }
         }
       }
@@ -250,10 +265,11 @@ class BleProvider with ChangeNotifier implements BleProviderInterface {
       for (var service in services) {
         for (var char in service.characteristics) {
           final charUuid = char.uuid.toString().toUpperCase();
-          if (charUuid == museControlCharUuid.toUpperCase())
+          if (charUuid == museControlCharUuid.toUpperCase()) {
             controlChar = char;
-          else if (eegCharUuids.contains(charUuid))
+          } else if (eegCharUuids.contains(charUuid)) {
             foundEegChars[charUuid] = char;
+          }
         }
       }
       if (controlChar != null && foundEegChars.length >= 4) {
@@ -263,17 +279,23 @@ class BleProvider with ChangeNotifier implements BleProviderInterface {
           _valueSubscriptions.add(char.onValueReceived.listen((value) =>
               _onDataDispatcher(value, charUuid: char.uuid.toString())));
         }
-        // ★★★ Muse 2 のチャンネル数と電極設定を定義 ★★★
-        _eegChannelCount = 4;
-        _electrodeConfigs = [
-          ElectrodeConfig(name: "TP9", type: 0),
-          ElectrodeConfig(name: "AF7", type: 0),
-          ElectrodeConfig(name: "AF8", type: 0),
-          ElectrodeConfig(name: "TP10", type: 0),
-        ];
-        await _sendMuseCommand('p21');
-        await _sendMuseCommand('s');
-        await _sendMuseCommand('d');
+
+        _deviceProfile = DeviceProfile(
+          samplingRate: 256.0,
+          lsbToVolts: 4.8828125e-7, // 1LSB=0.488...uV
+          eegChannelCount: 4,
+          electrodeConfigs: [
+            ElectrodeConfig(name: "TP9", type: 0),
+            ElectrodeConfig(name: "AF7", type: 0),
+            ElectrodeConfig(name: "AF8", type: 0),
+            ElectrodeConfig(name: "TP10", type: 0),
+          ],
+        );
+        notifyListeners();
+
+        await _sendMuseCommand('p21'); // Preset 21 (no aux, no accel)
+        await _sendMuseCommand('s'); // Start streaming
+        await _sendMuseCommand('d'); // Get device info (optional)
         _updateStatus("接続完了: ${device.platformName}");
       } else {
         _updateStatus("エラー: Muse 2の必要なキャラクタリスティックが見つかりません");
@@ -301,18 +323,16 @@ class BleProvider with ChangeNotifier implements BleProviderInterface {
 
   void _handleDeviceConfigPacket(List<int> data) {
     debugPrint("[BLE] 📥 Received Device Configuration Packet.");
-    // 1(type)+1(num_ch)+6(rsv)+8ch*10B/ch = 88 bytes
     if (data.length < 88) {
       debugPrint("[BLE] ❌ Invalid DeviceConfigPacket size: ${data.length}");
       return;
     }
     final byteData = ByteData.view(Uint8List.fromList(data).buffer);
-    final numChannels = byteData.getUint8(1); // 物理的に有効なチャンネル数
+    final numActiveChannels = byteData.getUint8(1);
     final newConfigs = <ElectrodeConfig>[];
     const headerSize = 8;
     const configStructSize = 10;
 
-    // ★★★ [修正] 自作脳波計の場合、常に8チャンネル分の設定情報をパースする ★★★
     for (int i = 0; i < 8; i++) {
       final offset = headerSize + (i * configStructSize);
       final nameBytes = data.sublist(offset, offset + 8);
@@ -323,29 +343,31 @@ class BleProvider with ChangeNotifier implements BleProviderInterface {
       newConfigs.add(ElectrodeConfig(name: name, type: type));
     }
 
-    _eegChannelCount = numChannels; // 有効チャンネル数として保持（UI表示などに利用）
-    _electrodeConfigs = newConfigs; // 8チャンネル分の設定を保持
+    _deviceProfile = DeviceProfile(
+      samplingRate: 250.0,
+      // Vref=4.5V, Gain=24, 16bit signed ADC (-32768 to 32767)
+      lsbToVolts: 5.7220458984375e-6, // (4.5 / 24.0) / 32768.0,
+      eegChannelCount: numActiveChannels,
+      electrodeConfigs: newConfigs,
+    );
+    notifyListeners();
 
     debugPrint(
-        "[CONFIG] ✅ Parsed config for 8 channels. Active channels: $numChannels. First channel: '${_electrodeConfigs.first.name}'");
-    notifyListeners();
+        "[CONFIG] ✅ Parsed config. Active channels: $numActiveChannels.");
   }
 
   final List<int> _customEegReceiveBuffer = [];
   void _handleCustomEegChunkStream(List<int> data) {
-    // 電極設定が8ch分読み込まれるまでデータを無視
-    if (_electrodeConfigs.length < 8) {
+    if (_deviceProfile == null) {
       debugPrint(
-          "[BLE] ⚠️ Ignoring data chunk: device config is not yet fully parsed for 8ch.");
+          "[BLE] ⚠️ Ignoring data chunk: device profile is not yet set.");
       return;
     }
 
     _customEegReceiveBuffer.addAll(data);
 
-    const int chunkedPacketSize =
-        504; // Header(4) + 25 samples * SampleData(20)
-    const int sampleDataSize =
-        20; // signals(8ch*2B) + trigger(1B) + reserved(3B)
+    const int chunkedPacketSize = 504;
+    const int sampleDataSize = 20;
     const int headerSize = 4;
 
     while (_customEegReceiveBuffer.length >= chunkedPacketSize) {
@@ -355,11 +377,7 @@ class BleProvider with ChangeNotifier implements BleProviderInterface {
 
       final byteData = ByteData.view(packetData.buffer);
 
-      if (byteData.getUint8(0) != 0x66) {
-        debugPrint(
-            "[BLE] ❌ Invalid packet type. Expected 0x66, got 0x${byteData.getUint8(0).toRadixString(16)}.");
-        continue;
-      }
+      if (byteData.getUint8(0) != 0x66) continue;
 
       final startIndex = byteData.getUint16(1, Endian.little);
       final numSamples = byteData.getUint8(3);
@@ -367,21 +385,18 @@ class BleProvider with ChangeNotifier implements BleProviderInterface {
 
       for (int i = 0; i < numSamples; i++) {
         final int sampleOffset = headerSize + (i * sampleDataSize);
-
-        // ★★★ [修正] 自作脳波計の場合、常に8チャンネル分のデータを読み込む ★★★
         final List<int> eegValues = List.filled(8, 0);
         for (int ch = 0; ch < 8; ch++) {
           eegValues[ch] =
               byteData.getInt16(sampleOffset + (ch * 2), Endian.little);
         }
-
-        const int triggerOffsetInSample = 16; // 8 channels * 2 bytes
+        const int triggerOffsetInSample = 16;
         final int triggerState =
             byteData.getUint8(sampleOffset + triggerOffsetInSample);
 
         newPoints.add(SensorDataPoint(
           sampleIndex: startIndex + i,
-          eegValues: eegValues, // 8チャンネル分のデータを格納
+          eegValues: eegValues,
           accel: const [0, 0, 0],
           gyro: const [0, 0, 0],
           triggerState: triggerState,
@@ -408,30 +423,28 @@ class BleProvider with ChangeNotifier implements BleProviderInterface {
     _museEegBuffer[channelIndex] = samples;
 
     if (channelIndex == 1) {
-      // いずれかのチャンネルを基準に処理
+      // Use a specific channel as a pacemaker
       if (_museLastPacketIndex != -1 &&
           packetIndex != (_museLastPacketIndex + 1) & 0xFFFF) {
         debugPrint(
             "[Muse] Packet loss! prev: $_museLastPacketIndex, current: $packetIndex");
       }
       _museLastPacketIndex = packetIndex;
-      const double microVoltPerLsb12bit = 0.48828125;
-      const double center12bit = 2048.0;
       final newPoints = <SensorDataPoint>[];
       for (int i = 0; i < 12; i++) {
-        final ch0 = _museEegBuffer[0].isNotEmpty ? _museEegBuffer[0][i] : 0;
-        final ch1 = _museEegBuffer[1].isNotEmpty ? _museEegBuffer[1][i] : 0;
-        final ch2 = _museEegBuffer[2].isNotEmpty ? _museEegBuffer[2][i] : 0;
-        final ch3 = _museEegBuffer[3].isNotEmpty ? _museEegBuffer[3][i] : 0;
-        final eegRaw = [ch0, ch1, ch2, ch3]; // 4チャンネル分のデータ
-        final eegUv = eegRaw
-            .map((v) => (v.toDouble() - center12bit) * microVoltPerLsb12bit)
-            .toList(growable: false);
+        final eegRaw = [
+          _museEegBuffer[0].isNotEmpty ? _museEegBuffer[0][i] : 0, // TP9
+          _museEegBuffer[1].isNotEmpty ? _museEegBuffer[1][i] : 0, // AF7
+          _museEegBuffer[2].isNotEmpty ? _museEegBuffer[2][i] : 0, // AF8
+          _museEegBuffer[3].isNotEmpty ? _museEegBuffer[3][i] : 0, // TP10
+        ];
+
+        // Convert 12-bit unsigned to 16-bit signed-like
+        final eegInt16 = eegRaw.map((v) => v - 2048).toList();
 
         newPoints.add(SensorDataPoint(
           sampleIndex: _museSampleIndexCounter++,
-          eegValues: eegRaw, // 4チャンネル分のデータを格納
-          eegMicroVolts: eegUv,
+          eegValues: eegInt16,
           accel: const [0, 0, 0],
           gyro: const [0, 0, 0],
           triggerState: 0,
@@ -457,87 +470,57 @@ class BleProvider with ChangeNotifier implements BleProviderInterface {
     }
   }
 
+  /// ---------------------------------------------------------------------------
+  /// [MODIFIED] This method is modified to align with the provided schema.
+  /// ---------------------------------------------------------------------------
   Future<void> _prepareAndSendPayload() async {
-    if (_electrodeConfigs.isEmpty ||
+    if (_deviceProfile == null ||
         _serverUploadBuffer.length < samplesPerPayload) return;
 
     final samplesToSend = _serverUploadBuffer.sublist(0, samplesPerPayload);
     _serverUploadBuffer.removeRange(0, samplesPerPayload);
+
     final builder = BytesBuilder();
+    final profile = _deviceProfile!;
+    final eegConfigs = profile.electrodeConfigs;
 
-    // ★★★ [修正] デバイスタイプに応じて送信するチャンネル数を分岐 ★★★
-    if (_deviceType == DeviceType.customEeg) {
-      // --- 自作脳波計の場合: 8チャンネル + トリガー ---
-      const int eegChannelCountToServer = 8;
-      const int totalChannelsToServer =
-          eegChannelCountToServer + 1; // +1 for TRIG
+    final bool includeTrigger = _deviceType == DeviceType.customEeg;
+    final int numEegChannels = eegConfigs.length;
+    final int numTotalChannels = numEegChannels + (includeTrigger ? 1 : 0);
 
-      builder.add([0x02, totalChannelsToServer, 0, 0, 0, 0, 0, 0]);
+    builder.add([0x04, numTotalChannels, 0x00, 0x00]);
 
-      // _electrodeConfigsには8ch分の設定が格納されている
-      for (final config in _electrodeConfigs) {
-        final nameBytes = utf8.encode(config.name);
-        final paddedName = Uint8List(8)
-          ..setRange(0, nameBytes.length, nameBytes);
-        builder.add(paddedName);
-        builder.add([config.type, 0]);
-      }
-      // トリガーチャンネルの情報を追加
+    for (final config in eegConfigs) {
+      final nameBytes = utf8.encode(config.name);
+      final paddedName = Uint8List(8)..setRange(0, nameBytes.length, nameBytes);
+      builder.add(paddedName);
+      builder.add([config.type, 0x00]); // type, reserved
+    }
+
+    if (includeTrigger) {
       final trigNameBytes = utf8.encode("TRIG");
       final trigPaddedName = Uint8List(8)
         ..setRange(0, trigNameBytes.length, trigNameBytes);
       builder.add(trigPaddedName);
-      builder.add([3, 0]); // type=3 for trigger
+      builder.add([3, 0x00]); // type=3 (TRIG), reserved
+    }
 
-      for (final sample in samplesToSend) {
-        final signalsBytes = ByteData(eegChannelCountToServer * 2);
-        for (int i = 0; i < eegChannelCountToServer; i++) {
-          // sample.eegValuesには8ch分のデータが入っている
-          signalsBytes.setInt16(i * 2, sample.eegValues[i], Endian.little);
-        }
-        builder.add(signalsBytes.buffer.asUint8List());
-
-        final triggerBytes = ByteData(2);
-        triggerBytes.setUint16(0, sample.triggerState, Endian.little);
-        builder.add(triggerBytes.buffer.asUint8List());
-
-        builder.add(Uint8List(12)); // モーションデータは0で埋める
-        final impedanceBytes = Uint8List(totalChannelsToServer)
-          ..fillRange(0, totalChannelsToServer, 255);
-        builder.add(impedanceBytes);
+    for (final sample in samplesToSend) {
+      final signalsBytes = ByteData(numTotalChannels * 2);
+      for (int i = 0; i < numEegChannels; i++) {
+        signalsBytes.setInt16(i * 2, sample.eegValues[i], Endian.little);
       }
-    } else if (_deviceType == DeviceType.muse2) {
-      // --- Muse 2 の場合: 4チャンネル ---
-      const int eegChannelCountToServer = 4;
-      const int totalChannelsToServer = eegChannelCountToServer;
-
-      builder.add([0x02, totalChannelsToServer, 0, 0, 0, 0, 0, 0]);
-
-      // _electrodeConfigsには4ch分の設定が格納されている
-      for (final config in _electrodeConfigs) {
-        final nameBytes = utf8.encode(config.name);
-        final paddedName = Uint8List(8)
-          ..setRange(0, nameBytes.length, nameBytes);
-        builder.add(paddedName);
-        builder.add([config.type, 0]);
+      if (includeTrigger) {
+        signalsBytes.setInt16(
+            numEegChannels * 2, sample.triggerState, Endian.little);
       }
+      builder.add(signalsBytes.buffer.asUint8List());
 
-      for (final sample in samplesToSend) {
-        final signalsBytes = ByteData(eegChannelCountToServer * 2);
-        for (int i = 0; i < eegChannelCountToServer; i++) {
-          // sample.eegValuesには4ch分のデータが入っている
-          signalsBytes.setInt16(i * 2, sample.eegValues[i], Endian.little);
-        }
-        builder.add(signalsBytes.buffer.asUint8List());
+      builder.add(Uint8List(12));
 
-        builder.add(Uint8List(12)); // モーションデータは0で埋める
-        final impedanceBytes = Uint8List(totalChannelsToServer)
-          ..fillRange(0, totalChannelsToServer, 255);
-        builder.add(impedanceBytes);
-      }
-    } else {
-      // 未知のデバイスの場合は何もしない
-      return;
+      final impedanceBytes = Uint8List(numTotalChannels)
+        ..fillRange(0, numTotalChannels, 255);
+      builder.add(impedanceBytes);
     }
 
     final uncompressedPayload = builder.toBytes();
@@ -560,7 +543,7 @@ class BleProvider with ChangeNotifier implements BleProviderInterface {
     if (shouldLog) {
       if (compressedPayload != null) {
         final snippet = compressedPayload.sublist(
-            0, min(48, compressedPayload.length)); // Base64は長くなるので短めに
+            0, min(48, compressedPayload.length)); // Base64 is long
         debugPrint(
             "[COMPRESSED] Size: ${compressedPayload.length} bytes. Snippet (Base64): ${base64Encode(snippet)}...");
       } else {
@@ -574,12 +557,19 @@ class BleProvider with ChangeNotifier implements BleProviderInterface {
       debugPrint('[Payload] Compression failed.');
       return;
     }
-    _sendPayloadToServer(compressedPayload, samplesToSend.first.timestamp,
-        samplesToSend.last.timestamp);
+    _sendPayloadToServer(
+      compressedPayload,
+      profile,
+      samplesToSend.first.timestamp,
+      samplesToSend.last.timestamp,
+    );
   }
 
   Future<void> _sendPayloadToServer(
-      Uint8List compressedPacket, DateTime startTime, DateTime endTime) async {
+      Uint8List compressedPacket,
+      DeviceProfile profile,
+      DateTime startTime,
+      DateTime endTime) async {
     if (!_authProvider.isAuthenticated || _targetDevice == null) return;
 
     final body = jsonEncode({
@@ -588,7 +578,9 @@ class BleProvider with ChangeNotifier implements BleProviderInterface {
       'device_id': _targetDevice!.remoteId.str,
       'timestamp_start_ms': startTime.millisecondsSinceEpoch,
       'timestamp_end_ms': endTime.millisecondsSinceEpoch,
-      'payload_base64': base64Encode(compressedPacket)
+      'sampling_rate': profile.samplingRate,
+      'lsb_to_volts': profile.lsbToVolts,
+      'payload_base64': base64Encode(compressedPacket),
     });
 
     try {
@@ -608,16 +600,20 @@ class BleProvider with ChangeNotifier implements BleProviderInterface {
   }
 
   void _calculateValence() {
-    if (_displayDataBuffer.length < sampleRate || _electrodeConfigs.length < 2)
+    if (_deviceProfile == null || _displayDataBuffer.length < sampleRate)
       return;
+
+    final profile = _deviceProfile!;
+    if (profile.electrodeConfigs.length < 2) return;
+
     final recentData =
         _displayDataBuffer.sublist(_displayDataBuffer.length - sampleRate);
     double powerLeft = 0, powerRight = 0;
 
     final leftIndices = <int>[];
     final rightIndices = <int>[];
-    for (int i = 0; i < _electrodeConfigs.length; i++) {
-      final name = _electrodeConfigs[i].name.toLowerCase();
+    for (int i = 0; i < profile.electrodeConfigs.length; i++) {
+      final name = profile.electrodeConfigs[i].name.toLowerCase();
       final numberMatch = RegExp(r'(\d+)$').firstMatch(name);
       if (numberMatch != null) {
         final num = int.tryParse(numberMatch.group(1) ?? "");
@@ -634,21 +630,9 @@ class BleProvider with ChangeNotifier implements BleProviderInterface {
     }
     if (leftIndices.isEmpty || rightIndices.isEmpty) return;
 
-    if (_deviceType == DeviceType.customEeg) {
-      // customEegのデータ(int16)は既に0中心なので、そのまま2乗する
-      for (var point in recentData) {
-        for (var i in leftIndices) powerLeft += pow(point.eegValues[i], 2);
-        for (var i in rightIndices) powerRight += pow(point.eegValues[i], 2);
-      }
-    } else {
-      // Muse用のロジック (uint12の生データを想定)
-      // 元のコードのロジックを維持
-      for (var point in recentData) {
-        for (var i in leftIndices)
-          powerLeft += pow(point.eegValues[i] - 2048, 2); // 12bitの中心は2048
-        for (var i in rightIndices)
-          powerRight += pow(point.eegValues[i] - 2048, 2); // 12bitの中心は2048
-      }
+    for (var point in recentData) {
+      for (var i in leftIndices) powerLeft += pow(point.eegValues[i], 2);
+      for (var i in rightIndices) powerRight += pow(point.eegValues[i], 2);
     }
 
     if (powerLeft > 0 && powerRight > 0) {
@@ -673,9 +657,11 @@ class BleProvider with ChangeNotifier implements BleProviderInterface {
   Future<void> disconnect() async {
     if (_isConnected && _rxCharacteristic != null) {
       try {
-        if (_deviceType == DeviceType.customEeg)
+        if (_deviceType == DeviceType.customEeg) {
           await _rxCharacteristic!.write([0x5B], withoutResponse: true);
-        else if (_deviceType == DeviceType.muse2) await _sendMuseCommand('h');
+        } else if (_deviceType == DeviceType.muse2) {
+          await _sendMuseCommand('h');
+        }
       } catch (e) {
         debugPrint("[BLE] Error sending stop command: $e");
       }
@@ -711,8 +697,7 @@ class BleProvider with ChangeNotifier implements BleProviderInterface {
     _customEegReceiveBuffer.clear();
     _museEegBuffer.forEach((b) => b.clear());
     _museLastPacketIndex = -1;
-    _electrodeConfigs.clear();
-    _eegChannelCount = 0;
+    _deviceProfile = null;
     _updateStatus("未接続");
     notifyListeners();
   }

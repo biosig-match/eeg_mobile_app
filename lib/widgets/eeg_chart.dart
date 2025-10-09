@@ -2,6 +2,8 @@ import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 import 'dart:math';
 import '../models/sensor_data.dart';
+import '../providers/ble_provider.dart';
+import 'package:provider/provider.dart';
 
 /// 複数チャンネルのEEGを縦に並べて表示する。
 /// 右上の「範囲フィット」ボタンで、現時点のバッファ最小最大を
@@ -33,14 +35,15 @@ class _EegMultiChannelChartState extends State<EegMultiChannelChart> {
   void _fitRanges() {
     if (widget.data.isEmpty) return;
 
-    // ADS1299用の変換係数を定義 (Vref=4.5V, Gain=24, 24bitADCを16bitで利用)
-    // LSB(16bit) = (Vref / Gain) / (2^23) * 2^8  [V]
-    const double ads1299MicroVoltsPerLsb = (4.5 / 24.0) * 256.0 / 8388608.0 * 1000000.0;
+    // Providerから現在のデバイスの変換係数を取得
+    final bleProvider = context.read<BleProvider>();
+    final lsbToMicrovolts = bleProvider.deviceProfile?.lsbToMicrovolts;
+    if (lsbToMicrovolts == null) return; // プロファイル未設定
 
     // データが存在する最大チャンネル数を推定
     int maxChannelsInData = 0;
     for (final p in widget.data) {
-      final len = p.eegMicroVolts?.length ?? p.eegValues.length;
+      final len = p.eegValues.length;
       if (len > maxChannelsInData) maxChannelsInData = len;
     }
 
@@ -50,18 +53,12 @@ class _EegMultiChannelChartState extends State<EegMultiChannelChart> {
       double? localMin;
       double? localMax;
       for (final p in widget.data) {
-        double? y;
-        if (p.eegMicroVolts != null && ch < p.eegMicroVolts!.length) {
-          // 既にμVに変換されているデータ (Muse2など)
-          y = p.eegMicroVolts![ch];
-        } else if (ch < p.eegValues.length) {
-          // 生データからμVに変換 (ADS1299を想定)
-          // ADS1299は符号付き16bitなので、オフセットなしで係数を掛ける
-          y = p.eegValues[ch].toDouble() * ads1299MicroVoltsPerLsb;
+        if (ch < p.eegValues.length) {
+          // 常に生のADC値から、取得した係数でµVに変換
+          final y = p.eegValues[ch].toDouble() * lsbToMicrovolts;
+          localMin = (localMin == null) ? y : min(y, localMin);
+          localMax = (localMax == null) ? y : max(y, localMax);
         }
-        if (y == null) continue;
-        localMin = (localMin == null) ? y : min(y, localMin);
-        localMax = (localMax == null) ? y : max(y, localMax);
       }
       if (localMin != null && localMax != null) {
         // クランプ前の生データでの範囲に，視認性のため5%（最低±1µV）の余白を追加
@@ -104,7 +101,9 @@ class _EegMultiChannelChartState extends State<EegMultiChannelChart> {
               onPressed: _fitRanges,
               icon: const Icon(Icons.fullscreen, size: 16),
               label: const Text('範囲フィット'),
-              style: OutlinedButton.styleFrom(minimumSize: const Size(0, 32), visualDensity: VisualDensity.compact),
+              style: OutlinedButton.styleFrom(
+                  minimumSize: const Size(0, 32),
+                  visualDensity: VisualDensity.compact),
             ),
           ),
         ),
@@ -135,8 +134,6 @@ class _EegMultiChannelChartState extends State<EegMultiChannelChart> {
 }
 
 /// 単一チャンネルのEEG可視化。
-/// - y値は受信時に変換済みのµVがあればそれを採用、なければADS1299用の16bit換算にフォールバック。
-/// - yレンジは親からロックされた値があればそれを使用、無ければ既定±100µV。
 class _SingleChannelChart extends StatelessWidget {
   final List<SensorDataPoint> data;
   final int sampleRate;
@@ -156,8 +153,10 @@ class _SingleChannelChart extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // ADS1299用の変換係数
-    const double ads1299MicroVoltsPerLsb = (4.5 / 24.0) * 256.0 / 8388608.0 * 1000000.0; // 約 5.722
+    // Providerから変換係数を取得
+    final bleProvider = context.watch<BleProvider>();
+    final lsbToMicrovolts = bleProvider.deviceProfile?.lsbToMicrovolts;
+
     const double defaultYMin = -100.0;
     const double defaultYMax = 100.0;
 
@@ -167,10 +166,8 @@ class _SingleChannelChart extends StatelessWidget {
 
     return Container(
       padding: const EdgeInsets.only(top: 16, right: 16, bottom: 8),
-      // プロットエリア以外の背景は、Scaffoldの背景色に依存
       child: LineChart(
         LineChartData(
-          // プロットエリアの背景色
           backgroundColor: const Color(0xff232d37),
 
           // === データプロット定義 ===
@@ -183,17 +180,14 @@ class _SingleChannelChart extends StatelessWidget {
                     final index = entry.key;
                     final point = entry.value;
 
-                    double? y;
-                    if (point.eegMicroVolts != null && channelIndex < point.eegMicroVolts!.length) {
-                      // 変換済みデータ (Muse2など)
-                      y = point.eegMicroVolts![channelIndex];
-                    } else if (channelIndex < point.eegValues.length) {
-                      // 生データから変換 (ADS1299を想定)
-                      y = point.eegValues[channelIndex].toDouble() * ads1299MicroVoltsPerLsb;
+                    if (lsbToMicrovolts == null ||
+                        channelIndex >= point.eegValues.length) {
+                      return FlSpot.nullSpot;
                     }
 
-                    if (y == null) return FlSpot.nullSpot;
-                    // 表示は視認性のためにレンジ内へクランプ
+                    // 常に生のADC値からµVに変換してプロット
+                    final y = point.eegValues[channelIndex].toDouble() *
+                        lsbToMicrovolts;
                     final double yClamped = y.clamp(yMin, yMax);
 
                     return FlSpot(
@@ -223,7 +217,6 @@ class _SingleChannelChart extends StatelessWidget {
             verticalInterval: sampleRate.toDouble(), // 1秒ごとに縦線
             drawHorizontalLine: true,
             getDrawingHorizontalLine: (value) {
-              // 0のベースラインのみ少し濃い線にする
               if (value == 0) {
                 return FlLine(
                   color: Colors.white.withOpacity(0.3),
@@ -245,11 +238,9 @@ class _SingleChannelChart extends StatelessWidget {
           titlesData: FlTitlesData(
             topTitles:
                 const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-
-            // --- 下軸（横軸：時刻）---
             bottomTitles: AxisTitles(
               sideTitles: SideTitles(
-                showTitles: showBottomTitles, // 表示/非表示を切り替え
+                showTitles: showBottomTitles,
                 reservedSize: 30.0,
                 interval: sampleRate.toDouble(),
                 getTitlesWidget: (value, meta) {
@@ -276,14 +267,11 @@ class _SingleChannelChart extends StatelessWidget {
                 },
               ),
             ),
-
-            // --- 左軸（縦軸：チャンネル）---
             leftTitles: AxisTitles(
               sideTitles: SideTitles(
                 showTitles: true,
                 reservedSize: 45.0,
                 getTitlesWidget: (value, meta) {
-                  // 中央のチャンネル名だけ表示
                   if (value == 0) {
                     return SideTitleWidget(
                       axisSide: meta.axisSide,
@@ -297,16 +285,12 @@ class _SingleChannelChart extends StatelessWidget {
                 },
               ),
             ),
-
-            // --- 右軸（縦軸：電圧）---
             rightTitles: AxisTitles(
               sideTitles: SideTitles(
                 showTitles: true,
                 reservedSize: 50.0,
-                // 上下端に1本（0は非表示）
                 interval: (yMax - yMin).abs(),
                 getTitlesWidget: (value, meta) {
-                  // 0の目盛りは左軸とかぶるので表示しない
                   if (value == 0) {
                     return const SizedBox.shrink();
                   }
@@ -322,16 +306,12 @@ class _SingleChannelChart extends StatelessWidget {
             ),
           ),
 
-          // === 枠線 ===
           borderData: FlBorderData(
             show: true,
             border: Border.all(color: Colors.white24),
           ),
-
-          // === その他 ===
           lineTouchData: const LineTouchData(enabled: false),
         ),
-        // アニメーションを無効化
         duration: Duration.zero,
       ),
     );
