@@ -8,7 +8,89 @@ class ExperimentsScreen extends StatelessWidget {
   const ExperimentsScreen({super.key});
 
   void _showCreateExperimentDialog(BuildContext context) {
-    // 省略 (変更なし)
+    final sessionProvider = context.read<SessionProvider>();
+    final nameController = TextEditingController();
+    final descriptionController = TextEditingController();
+    String presentationOrder = 'random';
+
+    showDialog(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: const Text("新しい実験を作成"),
+          content: StatefulBuilder(
+            builder: (ctx, setState) => SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  TextField(
+                    controller: nameController,
+                    decoration: const InputDecoration(
+                      labelText: "実験名",
+                      hintText: "例: ブランド認知度テスト",
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: descriptionController,
+                    minLines: 2,
+                    maxLines: 4,
+                    decoration: const InputDecoration(
+                      labelText: "説明",
+                      hintText: "任意で詳細を入力してください",
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  DropdownButtonFormField<String>(
+                    value: presentationOrder,
+                    items: const [
+                      DropdownMenuItem(value: 'random', child: Text('ランダム提示')),
+                      DropdownMenuItem(value: 'sequential', child: Text('順番通りに提示')),
+                    ],
+                    onChanged: (value) {
+                      if (value != null) {
+                        setState(() => presentationOrder = value);
+                      }
+                    },
+                    decoration: const InputDecoration(
+                      labelText: "刺激提示の順番",
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('キャンセル'),
+            ),
+            FilledButton(
+              onPressed: () async {
+                final name = nameController.text.trim();
+                final description = descriptionController.text.trim();
+                if (name.isEmpty) {
+                  Navigator.of(dialogContext).pop();
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('実験名を入力してください。')),
+                  );
+                  return;
+                }
+
+                Navigator.of(dialogContext).pop();
+                await sessionProvider.createExperiment(
+                  name: name,
+                  description: description,
+                  presentationOrder: presentationOrder,
+                );
+              },
+              child: const Text('作成'),
+            ),
+          ],
+        );
+      },
+    );
   }
 
   @override

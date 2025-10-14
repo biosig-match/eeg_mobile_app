@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../screens/analysis_screen.dart';
 import '../screens/bids_export_screen.dart';
 import '../screens/experiments_screen.dart';
+import '../screens/neuro_marketing_screen.dart';
 
 class AppDrawer extends StatelessWidget {
   const AppDrawer({super.key});
@@ -40,6 +41,15 @@ class AppDrawer extends StatelessWidget {
               Navigator.of(context).pop();
               Navigator.of(context).push(
                   MaterialPageRoute(builder: (_) => const AnalysisScreen()));
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.insights_outlined),
+            title: const Text('ニューロマーケ分析'),
+            onTap: () {
+              Navigator.of(context).pop();
+              Navigator.of(context).push(MaterialPageRoute(
+                  builder: (_) => const NeuroMarketingScreen()));
             },
           ),
           // ★★★ BIDSエクスポート画面への導線を追加 ★★★

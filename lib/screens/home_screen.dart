@@ -36,6 +36,8 @@ class _HomeScreenState extends State<HomeScreen> {
     final sessionProvider = context.read<SessionProvider>();
     final bleProvider = context.read<BleProvider>();
     final connectedDeviceId = bleProvider.deviceId;
+    final hasExperiment =
+        sessionProvider.isExperimentSelected && sessionProvider.selectedExperiment.id.isNotEmpty;
 
     if (connectedDeviceId == null) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -54,12 +56,22 @@ class _HomeScreenState extends State<HomeScreen> {
           children: [
             ElevatedButton(
               child: const Text("アプリ内で刺激を提示"),
-              onPressed: () {
-                Navigator.of(ctx).pop();
-                _startInAppPresentationSession(
-                    sessionProvider, connectedDeviceId, {});
-              },
+              onPressed: hasExperiment
+                  ? () {
+                      Navigator.of(ctx).pop();
+                      _startInAppPresentationSession(
+                          sessionProvider, connectedDeviceId, {});
+                    }
+                  : null,
             ),
+            if (!hasExperiment)
+              const Padding(
+                padding: EdgeInsets.only(top: 4),
+                child: Text(
+                  "※実験を選択するとアプリ内提示を利用できます",
+                  style: TextStyle(fontSize: 12, color: Colors.white70),
+                ),
+              ),
             const SizedBox(height: 8),
             ElevatedButton(
               child: const Text("外部アプリで刺激を提示 (PsychoPyなど)"),
@@ -77,6 +89,13 @@ class _HomeScreenState extends State<HomeScreen> {
 
   void _startInAppPresentationSession(SessionProvider sessionProvider,
       String deviceId, Map<String, dynamic> clockOffsetInfo) {
+    if (!sessionProvider.isExperimentSelected ||
+        sessionProvider.selectedExperiment.id.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('アプリ内刺激を提示するには実験を選択してください。')),
+      );
+      return;
+    }
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -245,12 +264,11 @@ class _HomeScreenState extends State<HomeScreen> {
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
         FloatingActionButton.extended(
-          onPressed:
-              session.isExperimentSelected ? _showSessionTypeDialog : null,
+          onPressed: _showSessionTypeDialog,
           label: const Text("セッション開始"),
           icon: const Icon(Icons.play_arrow),
           backgroundColor:
-              session.isExperimentSelected ? Colors.green : Colors.grey,
+              session.isExperimentSelected ? Colors.green : Colors.blueGrey,
         ),
         const SizedBox(width: 16),
         FloatingActionButton(

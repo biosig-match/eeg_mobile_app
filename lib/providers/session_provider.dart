@@ -24,7 +24,8 @@ class SessionProvider with ChangeNotifier {
   Experiment get selectedExperiment =>
       _experiments.firstWhere((e) => e.id == _selectedExperimentId,
           orElse: () => Experiment.empty());
-  bool get isExperimentSelected => _selectedExperimentId != null;
+  bool get isExperimentSelected =>
+      _selectedExperimentId != null && _selectedExperimentId!.isNotEmpty;
   Session? get currentSession => _currentSession;
   bool get isSessionRunning => _currentSession?.state == SessionState.running;
   String get statusMessage => _statusMessage;
@@ -44,7 +45,13 @@ class SessionProvider with ChangeNotifier {
       if (response.statusCode == 200) {
         final List<dynamic> data = jsonDecode(utf8.decode(response.bodyBytes));
         _experiments = data.map((json) => Experiment.fromJson(json)).toList();
-        _statusMessage = _experiments.isEmpty ? "参加中の実験がありません" : "実験を選択してください";
+        if (_experiments.isEmpty) {
+          _statusMessage = "参加中の実験がありません。フリーセッションを開始するか、新しい実験を作成してください";
+        } else if (_selectedExperimentId == null) {
+          _statusMessage = "実験を選択するか、フリーセッションを開始できます";
+        } else {
+          _statusMessage = "'${selectedExperiment.name}' が選択されています";
+        }
       } else {
         throw Exception('実験リストの取得に失敗: ${response.statusCode}');
       }
@@ -120,7 +127,8 @@ class SessionProvider with ChangeNotifier {
       }
 
       await fetchExperiments(); // リストを再取得してUIを更新
-      _statusMessage = "実験が正常に作成されました";
+      _selectedExperimentId = newExperimentId;
+      _statusMessage = "'${selectedExperiment.name}' を作成して選択しました";
     } catch (e) {
       _statusMessage = "エラー: $e";
     } finally {
@@ -136,6 +144,7 @@ class SessionProvider with ChangeNotifier {
 
   void deselectExperiment() {
     _selectedExperimentId = null;
+    _statusMessage = "フリーセッションモードです";
     notifyListeners();
   }
 
@@ -145,41 +154,53 @@ class SessionProvider with ChangeNotifier {
     required String deviceId,
     required Map<String, dynamic>? clockOffsetInfo,
   }) async {
-    if (isSessionRunning ||
-        !isExperimentSelected ||
-        !_authProvider.isAuthenticated) return;
+    if (isSessionRunning || !_authProvider.isAuthenticated) return;
 
     final creationTime = DateTime.now().toUtc();
     final sessionId =
         '${type.toString().split(".").last}-${creationTime.millisecondsSinceEpoch}';
 
+    final experimentId = _selectedExperimentId;
+
     _currentSession = Session(
       id: sessionId,
       userId: _authProvider.userId!,
-      experimentId: _selectedExperimentId!,
+      experimentId: experimentId,
       deviceId: deviceId,
       startTime: creationTime,
       type: type,
       clockOffsetInfo: clockOffsetInfo,
     );
-    _statusMessage = "セッション開始をサーバーに通知中...";
+    _statusMessage = experimentId == null || experimentId.isEmpty
+        ? "フリーセッションを開始しています..."
+        : "セッション開始をサーバーに通知中...";
     notifyListeners();
 
     try {
       final url = Uri.parse('${_config.httpBaseUrl}/api/v1/sessions/start');
+      // [修正点] payload の型を Map<String, dynamic> として明示的に宣言
+      final Map<String, dynamic> payload = {
+        'session_id': _currentSession!.id,
+        'user_id': _currentSession!.userId,
+        'start_time': _currentSession!.startTime.toIso8601String(),
+        'session_type': _currentSession!.type.toString().split('.').last,
+      };
+
+      if (experimentId != null && experimentId.isNotEmpty) {
+        payload['experiment_id'] = experimentId;
+      }
+      if (clockOffsetInfo != null && clockOffsetInfo.isNotEmpty) {
+        // この行でエラーが発生しなくなります
+        payload['clock_offset_info'] = clockOffsetInfo;
+      }
+
       final response = await http.post(
         url,
         headers: {
           'Content-Type': 'application/json',
           'X-User-Id': _authProvider.userId!,
         },
-        body: jsonEncode({
-          'session_id': _currentSession!.id,
-          'user_id': _currentSession!.userId,
-          'experiment_id': _currentSession!.experimentId,
-          'start_time': _currentSession!.startTime.toIso8601String(),
-          'session_type': _currentSession!.type.toString().split('.').last,
-        }),
+        body: jsonEncode(payload),
       );
 
       if (response.statusCode != 201) {

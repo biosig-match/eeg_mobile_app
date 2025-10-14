@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'dart:math';
 
+import '../models/experiment.dart';
 import '../models/session.dart';
 import '../models/stimulus.dart';
 import '../providers/session_provider.dart';
@@ -48,7 +49,6 @@ class _StimulusPresentationScreenState
     final sessionProvider = context.read<SessionProvider>();
     final stimulusProvider = context.read<StimulusProvider>();
     final session = sessionProvider.currentSession;
-    final experiment = sessionProvider.selectedExperiment;
 
     if (session == null) {
       _finishWithError("セッション情報が見つかりません。");
@@ -56,11 +56,34 @@ class _StimulusPresentationScreenState
     }
 
     setState(() => _loadingMessage = "刺激リストを取得中...");
+    Experiment? activeExperiment;
+
     if (session.type == SessionType.calibration) {
       _presentationList = await stimulusProvider.fetchCalibrationItems();
     } else {
+      final experimentId = session.experimentId;
+      if (experimentId == null || experimentId.isEmpty) {
+        _finishWithError("実験が選択されていないため、アプリ内刺激を提示できません。");
+        return;
+      }
+
+      activeExperiment = sessionProvider.experiments.firstWhere(
+        (e) => e.id == experimentId,
+        orElse: () => Experiment.empty(),
+      );
+
+      if (activeExperiment.id.isEmpty) {
+        _finishWithError("指定された実験が見つかりません。");
+        return;
+      }
+
       _presentationList =
-          await stimulusProvider.fetchExperimentStimuli(experiment.id);
+          await stimulusProvider.fetchExperimentStimuli(activeExperiment.id);
+    }
+
+    if (activeExperiment != null &&
+        activeExperiment.presentationOrder == 'random') {
+      _presentationList.shuffle(Random());
     }
 
     if (!mounted) return; // 非同期処理後にウィジェットが破棄されていないか確認
@@ -70,16 +93,18 @@ class _StimulusPresentationScreenState
       return;
     }
 
-    if (experiment.presentationOrder == 'random') {
-      _presentationList.shuffle(Random());
-    }
+    final experimentIdForImages = session.experimentId;
 
     for (int i = 0; i < _presentationList.length; i++) {
       if (!mounted) return;
       setState(() => _loadingMessage =
           "画像をダウンロード中... (${i + 1}/${_presentationList.length})");
       final image =
-          await stimulusProvider.getImage(_presentationList[i].fileName);
+          await stimulusProvider.getImage(
+        _presentationList[i].fileName,
+        experimentId: experimentIdForImages,
+        isCalibration: session.type == SessionType.calibration,
+      );
       if (image == null) {
         _finishWithError("${_presentationList[i].fileName}のダウンロードに失敗しました。");
         return;

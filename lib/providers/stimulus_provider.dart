@@ -22,11 +22,24 @@ class StimulusProvider with ChangeNotifier {
   StimulusProvider(this._config, this._authProvider);
 
   // キャッシュから画像を取得、なければダウンロード
-  Future<Uint8List?> getImage(String filename) async {
-    if (_imageCache.containsKey(filename)) {
-      return _imageCache[filename];
+  Future<Uint8List?> getImage(
+    String filename, {
+    String? experimentId,
+    bool isCalibration = false,
+  }) async {
+    final cacheKey = isCalibration
+        ? 'calibration:$filename'
+        : '${experimentId ?? 'free'}:$filename';
+
+    if (_imageCache.containsKey(cacheKey)) {
+      return _imageCache[cacheKey];
     }
-    return await _downloadStimulusImage(filename);
+    return await _downloadStimulusImage(
+      filename,
+      experimentId: experimentId,
+      isCalibration: isCalibration,
+      cacheKey: cacheKey,
+    );
   }
 
   // 実験用の刺激メタデータリストを取得
@@ -77,19 +90,35 @@ class StimulusProvider with ChangeNotifier {
   }
 
   // サーバーから画像をダウンロードしてキャッシュに保存
-  Future<Uint8List?> _downloadStimulusImage(String filename) async {
+  Future<Uint8List?> _downloadStimulusImage(
+    String filename, {
+    String? experimentId,
+    required bool isCalibration,
+    required String cacheKey,
+  }) async {
     if (!_authProvider.isAuthenticated) return null;
     _setLoading(true);
     try {
-      final url =
-          Uri.parse('${_config.httpBaseUrl}/api/v1/stimuli/download/$filename');
+      Uri? url;
+      if (isCalibration) {
+        url = Uri.parse(
+            '${_config.httpBaseUrl}/api/v1/stimuli/calibration/download/$filename');
+      } else if (experimentId != null && experimentId.isNotEmpty) {
+        url = Uri.parse(
+            '${_config.httpBaseUrl}/api/v1/stimuli/$experimentId/download/$filename');
+      }
+
+      if (url == null) {
+        throw Exception('experimentId is required to download stimulus $filename');
+      }
+
       final response = await http.get(url, headers: {
         'X-User-Id': _authProvider.userId!
       }).timeout(const Duration(seconds: 10));
 
       if (response.statusCode == 200) {
         final imageBytes = response.bodyBytes;
-        _imageCache[filename] = imageBytes; // キャッシュに保存
+        _imageCache[cacheKey] = imageBytes; // キャッシュに保存
         return imageBytes;
       } else {
         throw Exception('画像ダウンロード失敗: ${response.statusCode}');

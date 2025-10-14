@@ -6,6 +6,7 @@ import 'providers/auth_provider.dart';
 import 'providers/bids_provider.dart';
 import 'providers/ble_provider.dart';
 import 'providers/media_provider.dart';
+import 'providers/erp_analysis_provider.dart';
 import 'providers/session_provider.dart';
 import 'providers/stimulus_provider.dart';
 import 'screens/home_screen.dart';
@@ -54,6 +55,11 @@ class MyApp extends StatelessWidget {
           create: (context) =>
               StimulusProvider(serverConfig, context.read<AuthProvider>()),
           update: (_, auth, __) => StimulusProvider(serverConfig, auth),
+        ),
+        ChangeNotifierProxyProvider<AuthProvider, ErpAnalysisProvider>(
+          create: (context) =>
+              ErpAnalysisProvider(serverConfig, context.read<AuthProvider>()),
+          update: (_, auth, __) => ErpAnalysisProvider(serverConfig, auth),
         ),
         ChangeNotifierProxyProvider<AuthProvider, BidsProvider>(
           create: (context) =>
