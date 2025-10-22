@@ -4,6 +4,7 @@ import 'package:permission_handler/permission_handler.dart';
 
 import '../models/session.dart';
 import '../providers/ble_provider.dart';
+import '../providers/media_provider.dart';
 import '../providers/session_provider.dart';
 import '../widgets/app_drawer.dart';
 import '../widgets/eeg_chart.dart';
@@ -23,22 +24,27 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
-    [
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _initializePermissionsAndMedia();
+    });
+  }
+
+  Future<void> _initializePermissionsAndMedia() async {
+    await [
       Permission.bluetoothScan,
       Permission.bluetoothConnect,
       Permission.location,
       Permission.camera,
       Permission.microphone,
     ].request();
+    if (!mounted) return;
+    await context.read<MediaProvider>().initialize();
   }
 
   void _showSessionTypeDialog() {
     final sessionProvider = context.read<SessionProvider>();
     final bleProvider = context.read<BleProvider>();
     final connectedDeviceId = bleProvider.deviceId;
-    final hasExperiment =
-        sessionProvider.isExperimentSelected && sessionProvider.selectedExperiment.id.isNotEmpty;
-
     if (connectedDeviceId == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text("デバイスIDが不明です。再接続してください。")),
@@ -56,19 +62,18 @@ class _HomeScreenState extends State<HomeScreen> {
           children: [
             ElevatedButton(
               child: const Text("アプリ内で刺激を提示"),
-              onPressed: hasExperiment
-                  ? () {
-                      Navigator.of(ctx).pop();
-                      _startInAppPresentationSession(
-                          sessionProvider, connectedDeviceId, {});
-                    }
-                  : null,
+              onPressed: () {
+                Navigator.of(ctx).pop();
+                _startInAppPresentationSession(
+                    sessionProvider, connectedDeviceId, {});
+              },
             ),
-            if (!hasExperiment)
+            if (!sessionProvider.isExperimentSelected ||
+                sessionProvider.selectedExperiment.id.isEmpty)
               const Padding(
                 padding: EdgeInsets.only(top: 4),
                 child: Text(
-                  "※実験を選択するとアプリ内提示を利用できます",
+                  "※本計測を実行する場合は実験を選択してください（キャリブレーションは不要）",
                   style: TextStyle(fontSize: 12, color: Colors.white70),
                 ),
               ),
@@ -89,13 +94,8 @@ class _HomeScreenState extends State<HomeScreen> {
 
   void _startInAppPresentationSession(SessionProvider sessionProvider,
       String deviceId, Map<String, dynamic> clockOffsetInfo) {
-    if (!sessionProvider.isExperimentSelected ||
-        sessionProvider.selectedExperiment.id.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('アプリ内刺激を提示するには実験を選択してください。')),
-      );
-      return;
-    }
+    final canRunMainTask = sessionProvider.isExperimentSelected &&
+        sessionProvider.selectedExperiment.id.isNotEmpty;
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -118,19 +118,29 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
           FilledButton(
             child: const Text("本計測"),
-            onPressed: () async {
-              Navigator.of(ctx).pop();
-              await sessionProvider.startSession(
-                type: SessionType.main_task,
-                deviceId: deviceId,
-                clockOffsetInfo: clockOffsetInfo,
-              );
-              if (mounted && sessionProvider.isSessionRunning) {
-                Navigator.of(context).push(MaterialPageRoute(
-                    builder: (_) => const StimulusPresentationScreen()));
-              }
-            },
+            onPressed: canRunMainTask
+                ? () async {
+                    Navigator.of(ctx).pop();
+                    await sessionProvider.startSession(
+                      type: SessionType.main_task,
+                      deviceId: deviceId,
+                      clockOffsetInfo: clockOffsetInfo,
+                    );
+                    if (mounted && sessionProvider.isSessionRunning) {
+                      Navigator.of(context).push(MaterialPageRoute(
+                          builder: (_) => const StimulusPresentationScreen()));
+                    }
+                  }
+                : null,
           ),
+          if (!canRunMainTask)
+            const Padding(
+              padding: EdgeInsets.only(top: 8.0, right: 8.0, left: 8.0, bottom: 4.0),
+              child: Text(
+                "※本計測を実行するには実験を選択してください。",
+                textAlign: TextAlign.center,
+              ),
+            ),
         ],
       ),
     );
@@ -194,7 +204,7 @@ class _HomeScreenState extends State<HomeScreen> {
             padding: const EdgeInsets.all(8.0),
             child: Column(
               children: [
-                Card(
+            Card(
               child: ListTile(
                 leading: const Icon(Icons.science_outlined),
                 title: Text(sessionProvider.selectedExperiment.name),
@@ -206,6 +216,38 @@ class _HomeScreenState extends State<HomeScreen> {
                     Navigator.of(context).push(MaterialPageRoute(
                         builder: (_) => const ExperimentsScreen()));
                   },
+                ),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Consumer<MediaProvider>(
+              builder: (context, mediaProvider, _) => Card(
+                child: Column(
+                  children: [
+                    SwitchListTile(
+                      title: const Text("10秒ごとの音声録音とアップロード"),
+                      subtitle: const Text("セッション中に10秒間の音声を継続的に送信します"),
+                      value: mediaProvider.enableAudioCapture,
+                      onChanged: (value) {
+                        mediaProvider.setEnableAudioCapture(value);
+                      },
+                    ),
+                    SwitchListTile(
+                      title: const Text("5秒時点の写真撮影とアップロード"),
+                      subtitle: mediaProvider.cameraReady
+                          ? const Text("セッションごとに撮影される画像の送信を切り替えます")
+                          : const Text(
+                              "カメラが利用できないため画像は送信されません",
+                              style: TextStyle(color: Colors.orangeAccent),
+                            ),
+                      value: mediaProvider.enableImageCapture && mediaProvider.cameraReady,
+                      onChanged: mediaProvider.cameraReady
+                          ? (value) {
+                              mediaProvider.setEnableImageCapture(value);
+                            }
+                          : null,
+                    ),
+                  ],
                 ),
               ),
             ),

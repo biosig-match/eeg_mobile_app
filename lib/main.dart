@@ -48,8 +48,12 @@ class MyApp extends StatelessWidget {
             MediaProvider>(
           create: (context) => MediaProvider(serverConfig,
               context.read<AuthProvider>(), context.read<SessionProvider>()),
-          update: (_, auth, session, previous) =>
-              MediaProvider(serverConfig, auth, session),
+          update: (_, auth, session, previous) {
+            final provider =
+                previous ?? MediaProvider(serverConfig, auth, session);
+            provider.updateDependencies(auth, session);
+            return provider;
+          },
         ),
         ChangeNotifierProxyProvider<AuthProvider, StimulusProvider>(
           create: (context) =>

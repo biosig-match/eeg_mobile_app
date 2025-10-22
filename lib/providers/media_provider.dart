@@ -14,115 +14,261 @@ import 'session_provider.dart';
 
 class MediaProvider with ChangeNotifier {
   final ServerConfig _config;
-  final AuthProvider _authProvider;
-  final SessionProvider _sessionProvider;
+  AuthProvider _authProvider;
+  SessionProvider _sessionProvider;
 
   CameraController? _cameraController;
   final AudioRecorder _audioRecorder = AudioRecorder();
-  Timer? _mediaTimer;
   bool _isInitialized = false;
+  bool _cameraReady = false;
+  bool _captureLoopActive = false;
+  bool _isCaptureLoopRunning = false;
+  bool _enableAudioCapture = true;
+  bool _enableImageCapture = true;
 
   MediaProvider(this._config, this._authProvider, this._sessionProvider) {
     _sessionProvider.addListener(_onSessionStateChanged);
   }
 
+  void updateDependencies(AuthProvider authProvider, SessionProvider sessionProvider) {
+    _authProvider = authProvider;
+    if (!identical(_sessionProvider, sessionProvider)) {
+      _sessionProvider.removeListener(_onSessionStateChanged);
+      _sessionProvider = sessionProvider;
+      _sessionProvider.addListener(_onSessionStateChanged);
+      _onSessionStateChanged();
+    }
+  }
+
+  bool get isInitialized => _isInitialized;
+  bool get cameraReady => _cameraReady;
+  bool get enableAudioCapture => _enableAudioCapture;
+  bool get enableImageCapture => _enableImageCapture;
+
+  Future<void> setEnableAudioCapture(bool value) async {
+    if (_enableAudioCapture == value) return;
+    _enableAudioCapture = value;
+    if (!_enableAudioCapture && await _audioRecorder.isRecording()) {
+      await _audioRecorder.stop();
+    }
+    if (_sessionProvider.isSessionRunning) {
+      if (_enableAudioCapture || _enableImageCapture) {
+        unawaited(_startMediaCapture());
+      } else {
+        unawaited(_stopMediaCapture());
+      }
+    }
+    notifyListeners();
+  }
+
+  Future<void> setEnableImageCapture(bool value) async {
+    if (_enableImageCapture == value) return;
+    if (value && !_cameraReady) {
+      await initialize();
+    }
+    _enableImageCapture = value && _cameraReady;
+    if (_sessionProvider.isSessionRunning) {
+      if (_enableAudioCapture || _enableImageCapture) {
+        unawaited(_startMediaCapture());
+      } else {
+        unawaited(_stopMediaCapture());
+      }
+    }
+    notifyListeners();
+  }
+
   Future<void> initialize() async {
-    if (_isInitialized) return;
+    if (_isInitialized && (_cameraController != null || !_enableImageCapture)) {
+      return;
+    }
     try {
       final cameras = await availableCameras();
-      if (cameras.isEmpty) {
+      if (cameras.isNotEmpty) {
+        _cameraController?.dispose();
+        final firstCamera = cameras.first;
+        _cameraController = CameraController(
+          firstCamera,
+          ResolutionPreset.medium,
+          enableAudio: false,
+        );
+        await _cameraController!.initialize();
+        _cameraReady = true;
+      } else {
+        _cameraReady = false;
         debugPrint("利用可能なカメラがありません。");
-        return;
       }
-      final firstCamera = cameras.first;
-      _cameraController = CameraController(
-        firstCamera,
-        ResolutionPreset.medium,
-        enableAudio: false,
-      );
-      await _cameraController!.initialize();
-      _isInitialized = true;
     } catch (e) {
+      _cameraController?.dispose();
+      _cameraController = null;
+      _cameraReady = false;
       debugPrint("メディアプロバイダーの初期化に失敗: $e");
+    } finally {
+      _isInitialized = true;
+      notifyListeners();
     }
   }
 
   void _onSessionStateChanged() {
     if (_sessionProvider.isSessionRunning) {
-      _startMediaCapture();
+      unawaited(_startMediaCapture());
     } else {
-      _stopMediaCapture();
+      unawaited(_stopMediaCapture());
     }
   }
 
-  void _startMediaCapture() {
-    if (!_isInitialized) return;
-    _mediaTimer?.cancel();
-    // 10秒ごとにキャプチャとアップロードを実行
-    _mediaTimer = Timer.periodic(const Duration(seconds: 10), (timer) {
-      _captureAndUpload();
-    });
+  Future<void> _startMediaCapture() async {
+    if (!_enableAudioCapture && !_enableImageCapture) return;
+    if (!_isInitialized) {
+      await initialize();
+    }
+    if (_captureLoopActive) return;
+    _captureLoopActive = true;
+    unawaited(_runCaptureLoop());
   }
 
   Future<void> _stopMediaCapture() async {
-    _mediaTimer?.cancel();
+    _captureLoopActive = false;
     if (await _audioRecorder.isRecording()) {
-      await _audioRecorder.stop();
+      try {
+        await _audioRecorder.stop();
+      } catch (e) {
+        debugPrint("録音停止中にエラー: $e");
+      }
     }
   }
 
-  Future<void> _captureAndUpload() async {
-    if (!_isInitialized || !_sessionProvider.isSessionRunning) return;
+  Future<void> _runCaptureLoop() async {
+    if (_isCaptureLoopRunning) return;
+    _isCaptureLoopRunning = true;
+    while (_captureLoopActive && _sessionProvider.isSessionRunning) {
+      await _executeCaptureCycle();
+    }
+    _isCaptureLoopRunning = false;
+  }
 
-    // ★★★ 1. 音声録音開始時刻を記録 ★★★
-    final audioStartTime = DateTime.now().toUtc();
-    final audioTempPath = p.join((await Directory.systemTemp.createTemp()).path,
-        'audio_${audioStartTime.millisecondsSinceEpoch}.m4a');
+  Future<void> _executeCaptureCycle() async {
+    if (!_sessionProvider.isSessionRunning) return;
 
-    await _audioRecorder.start(const RecordConfig(encoder: AudioEncoder.aacLc),
-        path: audioTempPath);
+    final bool captureAudio = _enableAudioCapture;
+    final bool captureImage =
+        _enableImageCapture && _cameraController != null && _cameraController!.value.isInitialized;
 
-    // 5秒待機して画像を撮影
-    await Future.delayed(const Duration(seconds: 5));
+    Directory? audioTempDir;
+    String? audioTempPath;
+    DateTime? audioStartUtc;
+    DateTime? audioEndUtc;
+    DateTime? audioStartLocal;
 
-    // ★★★ 2. 画像撮影時刻を記録 ★★★
-    final imageTimestamp = DateTime.now().toUtc();
-    final imageFile = await _cameraController?.takePicture();
+    if (captureAudio) {
+      if (await _audioRecorder.isRecording()) {
+        await _audioRecorder.stop();
+      }
+      audioTempDir = await Directory.systemTemp
+          .createTemp('audio_chunk_${DateTime.now().millisecondsSinceEpoch}');
+      audioStartLocal = DateTime.now();
+      audioStartUtc = audioStartLocal.toUtc();
+      audioTempPath =
+          p.join(audioTempDir.path, 'audio_${audioStartUtc.millisecondsSinceEpoch}.m4a');
 
-    // さらに5秒待機して録音を終了
-    await Future.delayed(const Duration(seconds: 5));
-
-    // ★★★ 3. 音声録音終了時刻を記録 ★★★
-    final audioEndTime = DateTime.now().toUtc();
-    final audioPath = await _audioRecorder.stop();
-
-    // 画像のアップロード
-    if (imageFile != null) {
-      final imageBytes = await imageFile.readAsBytes();
-      await _uploadMedia(
-        imageBytes,
-        'image/jpeg',
-        'photo.jpg',
-        compress: true,
-        timestamp: imageTimestamp, // ★★★ 撮影時刻を渡す
+      await _audioRecorder.start(
+        const RecordConfig(encoder: AudioEncoder.aacLc),
+        path: audioTempPath,
       );
     }
 
-    // 音声のアップロード
-    if (audioPath != null) {
+    await Future.delayed(const Duration(seconds: 5));
+
+    if (!_captureLoopActive || !_sessionProvider.isSessionRunning) {
+      if (captureAudio && await _audioRecorder.isRecording()) {
+        await _audioRecorder.stop();
+      }
+      return;
+    }
+
+    XFile? imageFile;
+    DateTime? imageTimestampUtc;
+    if (captureImage) {
+      try {
+        imageTimestampUtc = DateTime.now().toUtc();
+        imageFile = await _cameraController!.takePicture();
+      } catch (e) {
+        debugPrint("画像撮影に失敗: $e");
+      }
+    }
+
+    if (captureAudio) {
+      final plannedEndLocal = audioStartLocal!.add(const Duration(seconds: 10));
+      final now = DateTime.now();
+      final remaining = plannedEndLocal.difference(now);
+      if (remaining.inMilliseconds > 0) {
+        await Future.delayed(remaining);
+      }
+    } else {
+      await Future.delayed(const Duration(seconds: 5));
+    }
+
+    if (!_captureLoopActive || !_sessionProvider.isSessionRunning) {
+      if (captureAudio && await _audioRecorder.isRecording()) {
+        await _audioRecorder.stop();
+      }
+      return;
+    }
+
+    String? audioPath;
+    if (captureAudio) {
+      audioEndUtc = DateTime.now().toUtc();
+      audioPath = await _audioRecorder.stop();
+    }
+
+    final List<Future<void>> uploads = [];
+
+    if (captureImage && imageFile != null) {
+      final imageBytes = await imageFile.readAsBytes();
+      final imageFilename =
+          'photo_${imageTimestampUtc?.millisecondsSinceEpoch ?? DateTime.now().millisecondsSinceEpoch}.jpg';
+      uploads.add(_uploadMedia(
+        imageBytes,
+        'image/jpeg',
+        imageFilename,
+        compress: true,
+        timestamp: imageTimestampUtc,
+      ));
+      try {
+        final imagePath = imageFile.path;
+        if (imagePath != null && imagePath.isNotEmpty) {
+          final tempImageFile = File(imagePath);
+          if (await tempImageFile.exists()) {
+            await tempImageFile.delete();
+          }
+        }
+      } catch (_) {}
+    }
+
+    if (captureAudio && audioPath != null) {
       final audioFile = File(audioPath);
       if (await audioFile.exists()) {
         final audioBytes = await audioFile.readAsBytes();
-        await _uploadMedia(
+        final audioFilename =
+            'audio_${audioStartUtc?.millisecondsSinceEpoch ?? DateTime.now().millisecondsSinceEpoch}.m4a';
+        uploads.add(_uploadMedia(
           audioBytes,
           'audio/m4a',
-          'audio.m4a',
+          audioFilename,
           compress: true,
-          startTime: audioStartTime, // ★★★ 録音開始時刻を渡す
-          endTime: audioEndTime, // ★★★ 録音終了時刻を渡す
-        );
-        await audioFile.delete(); // 一時ファイルを削除
+          startTime: audioStartUtc,
+          endTime: audioEndUtc,
+        ));
+        await audioFile.delete();
       }
+      if (audioTempDir != null && await audioTempDir.exists()) {
+        await audioTempDir.delete(recursive: true);
+      }
+    }
+
+    if (uploads.isNotEmpty) {
+      unawaited(Future.wait(uploads).catchError(
+        (error, stackTrace) => debugPrint("メディアアップロード待機中にエラー: $error"),
+      ));
     }
   }
 
@@ -193,9 +339,9 @@ class MediaProvider with ChangeNotifier {
 
   @override
   void dispose() {
+    _captureLoopActive = false;
     _cameraController?.dispose();
     _audioRecorder.dispose();
-    _mediaTimer?.cancel();
     _sessionProvider.removeListener(_onSessionStateChanged);
     super.dispose();
   }
