@@ -27,11 +27,19 @@ class _StimulusPresentationScreenState
   ScreenState _screenState = ScreenState.loading;
   String _loadingMessage = "刺激情報を準備中...";
   List<BaseStimulus> _presentationList = [];
+  final List<Uint8List> _stimulusImages = [];
   int _currentIndex = 0;
+  bool _isStimulusVisible = false;
+  bool _isCalibrationSession = false;
+  String? _activeExperimentId;
   Timer? _stimulusTimer;
   final Stopwatch _sessionStopwatch = Stopwatch();
 
   final List<Map<String, dynamic>> _eventLog = [];
+
+  static const Duration _stimulusDisplayDuration = Duration(seconds: 1);
+  static const Duration _interStimulusInterval = Duration(milliseconds: 1500);
+  static const double _triggerSquareSize = 80;
 
   @override
   void initState() {
@@ -57,11 +65,19 @@ class _StimulusPresentationScreenState
 
     setState(() => _loadingMessage = "刺激リストを取得中...");
     Experiment? activeExperiment;
+    _eventLog.clear();
+    _stimulusImages.clear();
+    _currentIndex = 0;
+    _isStimulusVisible = false;
+    _isCalibrationSession = session.type == SessionType.calibration;
+    _activeExperimentId = session.experimentId;
 
-    if (session.type == SessionType.calibration) {
+    if (_isCalibrationSession) {
       _presentationList = await stimulusProvider.fetchCalibrationItems();
+      debugPrint(
+          '[StimulusPresentation] Calibration items fetched: ${_presentationList.length}');
     } else {
-      final experimentId = session.experimentId;
+      final experimentId = _activeExperimentId;
       if (experimentId == null || experimentId.isEmpty) {
         _finishWithError("実験が選択されていないため、アプリ内刺激を提示できません。");
         return;
@@ -79,6 +95,8 @@ class _StimulusPresentationScreenState
 
       _presentationList =
           await stimulusProvider.fetchExperimentStimuli(activeExperiment.id);
+      debugPrint(
+          '[StimulusPresentation] Experiment stimuli fetched: experimentId=${activeExperiment.id}, count=${_presentationList.length}');
     }
 
     if (activeExperiment != null &&
@@ -89,11 +107,14 @@ class _StimulusPresentationScreenState
     if (!mounted) return; // 非同期処理後にウィジェットが破棄されていないか確認
 
     if (_presentationList.isEmpty) {
-      _finishWithError("提示する刺激がありません。");
+      final providerError = stimulusProvider.errorMessage;
+      debugPrint(
+          '[StimulusPresentation] Received empty stimulus list. providerError=$providerError');
+      _finishWithError(providerError.isNotEmpty
+          ? "刺激が取得できません: $providerError"
+          : "提示する刺激がありません。");
       return;
     }
-
-    final experimentIdForImages = session.experimentId;
 
     for (int i = 0; i < _presentationList.length; i++) {
       if (!mounted) return;
@@ -102,13 +123,14 @@ class _StimulusPresentationScreenState
       final image =
           await stimulusProvider.getImage(
         _presentationList[i].fileName,
-        experimentId: experimentIdForImages,
-        isCalibration: session.type == SessionType.calibration,
+        experimentId: _isCalibrationSession ? null : _activeExperimentId,
+        isCalibration: _isCalibrationSession,
       );
       if (image == null) {
         _finishWithError("${_presentationList[i].fileName}のダウンロードに失敗しました。");
         return;
       }
+      _stimulusImages.add(image);
     }
 
     if (!mounted) return;
@@ -118,38 +140,57 @@ class _StimulusPresentationScreenState
   }
 
   void _startPresentation() {
+    if (_presentationList.isEmpty) return;
+    _stimulusTimer?.cancel();
+    _sessionStopwatch
+      ..reset()
+      ..start();
     setState(() {
       _screenState = ScreenState.running;
-      _sessionStopwatch.start();
-      _showNextStimulus();
+      _isStimulusVisible = false;
+      _currentIndex = 0;
     });
+    _presentStimulus();
   }
 
-  void _showNextStimulus() {
+  void _presentStimulus() {
     if (_currentIndex >= _presentationList.length) {
       _finishPresentation();
       return;
     }
 
     final currentStimulus = _presentationList[_currentIndex];
-    _eventLog.add({
-      'onset': _sessionStopwatch.elapsedMilliseconds / 1000.0,
-      'duration': 1.0,
+    final onsetSeconds = _sessionStopwatch.elapsedMilliseconds / 1000.0;
+    final event = <String, dynamic>{
+      'onset': onsetSeconds,
+      'duration': _stimulusDisplayDuration.inMilliseconds / 1000.0,
       'trial_type': currentStimulus.trialType,
       'file_name': currentStimulus.fileName,
+      'trigger_state': 'white',
+    };
+    if (currentStimulus is Stimulus) {
+      event['stimulus_id'] = currentStimulus.stimulusId;
+    } else if (currentStimulus is CalibrationItem) {
+      event['calibration_item_id'] = currentStimulus.itemId;
+    }
+    _eventLog.add(event);
+
+    _stimulusTimer?.cancel();
+    setState(() {
+      _isStimulusVisible = true;
     });
 
-    // 刺激表示タイマー (1秒表示 -> 1.5秒待機)
-    _stimulusTimer = Timer(const Duration(seconds: 1), () {
+    _stimulusTimer = Timer(_stimulusDisplayDuration, () {
       if (!mounted) return;
-      // 待機時間（十字表示）のためにUIを更新
-      setState(() {});
-      _stimulusTimer = Timer(const Duration(milliseconds: 1500), () {
+      setState(() {
+        _isStimulusVisible = false;
+      });
+      _stimulusTimer = Timer(_interStimulusInterval, () {
         if (!mounted) return;
         setState(() {
           _currentIndex++;
-          _showNextStimulus();
         });
+        _presentStimulus();
       });
     });
   }
@@ -159,10 +200,14 @@ class _StimulusPresentationScreenState
     _stimulusTimer?.cancel();
 
     final buffer = StringBuffer();
-    buffer.writeln('onset,duration,trial_type,file_name');
+    buffer.writeln(
+        'onset,duration,trial_type,file_name,stimulus_id,calibration_item_id,trigger_state');
     for (var row in _eventLog) {
+      final trialType = row['trial_type']?.toString() ?? '';
+      final fileName = row['file_name']?.toString() ?? '';
+      final triggerState = row['trigger_state']?.toString() ?? '';
       buffer.writeln(
-          '${row['onset']},${row['duration']},"${row['trial_type']}","${row['file_name']}"');
+          '${row['onset']},${row['duration']},"${_escapeCsv(trialType)}","${_escapeCsv(fileName)}",${row['stimulus_id'] ?? ''},${row['calibration_item_id'] ?? ''},"${_escapeCsv(triggerState)}"');
     }
     final csvData = buffer.toString();
 
@@ -182,6 +227,30 @@ class _StimulusPresentationScreenState
       Navigator.of(context).pop();
     }
   }
+
+  Widget _buildFixationCross() {
+    return SizedBox(
+      width: 120,
+      height: 120,
+      child: CustomPaint(
+        painter: _FixationCrossPainter(),
+      ),
+    );
+  }
+
+  Widget _buildTriggerIndicator() {
+    final fillColor = _isStimulusVisible ? Colors.white : Colors.black;
+    return Container(
+      width: _triggerSquareSize,
+      height: _triggerSquareSize,
+      decoration: BoxDecoration(
+        color: fillColor,
+        border: Border.all(color: Colors.white70, width: 2),
+      ),
+    );
+  }
+
+  String _escapeCsv(String value) => value.replaceAll('"', '""');
 
   @override
   void dispose() {
@@ -224,32 +293,51 @@ class _StimulusPresentationScreenState
           child: const Text("刺激提示を開始", style: TextStyle(fontSize: 18)),
         );
       case ScreenState.running:
-        if (_stimulusTimer?.isActive == true &&
-            _currentIndex < _presentationList.length) {
-          final stimulus = _presentationList[_currentIndex];
-          // StimulusProviderは画像をキャッシュしているのでFutureBuilderは不要
-          return Consumer<StimulusProvider>(
-            builder: (context, stimulusProvider, child) {
-              final imageBytes = stimulusProvider.getImage(stimulus.fileName);
-              return FutureBuilder<Uint8List?>(
-                future: imageBytes,
-                builder: (context, snapshot) {
-                  if (snapshot.connectionState == ConnectionState.done &&
-                      snapshot.data != null) {
-                    return Image.memory(snapshot.data!);
-                  }
-                  // 画像取得中も十字を表示
-                  return const Icon(Icons.add, color: Colors.white, size: 64);
-                },
-              );
-            },
-          );
-        } else {
-          return const Icon(Icons.add, color: Colors.white, size: 64);
-        }
+        final hasImage = _currentIndex < _stimulusImages.length;
+        final centerWidget = (_isStimulusVisible && hasImage)
+            ? Image.memory(
+                _stimulusImages[_currentIndex],
+                fit: BoxFit.contain,
+              )
+            : _buildFixationCross();
+        return Stack(
+          children: [
+            Center(child: centerWidget),
+            Positioned(
+              left: 24,
+              top: 24,
+              child: _buildTriggerIndicator(),
+            ),
+          ],
+        );
       case ScreenState.finished:
         return const Text("セッション完了",
             style: TextStyle(color: Colors.white, fontSize: 24));
     }
   }
+}
+
+class _FixationCrossPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = Colors.white
+      ..strokeWidth = size.shortestSide * 0.08
+      ..strokeCap = StrokeCap.round;
+    final center = Offset(size.width / 2, size.height / 2);
+    final halfLength = size.shortestSide / 2;
+    canvas.drawLine(
+      Offset(center.dx - halfLength, center.dy),
+      Offset(center.dx + halfLength, center.dy),
+      paint,
+    );
+    canvas.drawLine(
+      Offset(center.dx, center.dy - halfLength),
+      Offset(center.dx, center.dy + halfLength),
+      paint,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }

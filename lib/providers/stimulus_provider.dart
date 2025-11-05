@@ -54,6 +54,7 @@ class StimulusProvider with ChangeNotifier {
 
       if (response.statusCode == 200) {
         final List<dynamic> data = jsonDecode(utf8.decode(response.bodyBytes));
+        _clearError();
         return data.map((json) => Stimulus.fromJson(json)).toList();
       } else {
         throw Exception('刺激リストの取得に失敗: ${response.statusCode}');
@@ -77,6 +78,7 @@ class StimulusProvider with ChangeNotifier {
 
       if (response.statusCode == 200) {
         final List<dynamic> data = jsonDecode(utf8.decode(response.bodyBytes));
+        _clearError();
         return data.map((json) => CalibrationItem.fromJson(json)).toList();
       } else {
         throw Exception('キャリブレーション項目の取得に失敗: ${response.statusCode}');
@@ -119,6 +121,7 @@ class StimulusProvider with ChangeNotifier {
       if (response.statusCode == 200) {
         final imageBytes = response.bodyBytes;
         _imageCache[cacheKey] = imageBytes; // キャッシュに保存
+        _clearError();
         return imageBytes;
       } else {
         throw Exception('画像ダウンロード失敗: ${response.statusCode}');
@@ -138,6 +141,12 @@ class StimulusProvider with ChangeNotifier {
 
   void _setError(String message) {
     _errorMessage = message;
+    notifyListeners();
+  }
+
+  void _clearError() {
+    if (_errorMessage.isEmpty) return;
+    _errorMessage = '';
     notifyListeners();
   }
 }

@@ -27,7 +27,7 @@ class Stimulus extends BaseStimulus {
 
   factory Stimulus.fromJson(Map<String, dynamic> json) {
     return Stimulus(
-      stimulusId: json['stimulus_id'],
+      stimulusId: _parseInt(json['stimulus_id'], 'stimulus_id'),
       fileName: json['file_name'],
       stimulusType: json['stimulus_type'],
       trialType: json['trial_type'],
@@ -50,10 +50,20 @@ class CalibrationItem extends BaseStimulus {
 
   factory CalibrationItem.fromJson(Map<String, dynamic> json) {
     return CalibrationItem(
-      itemId: json['item_id'],
+      itemId: _parseInt(json['item_id'], 'item_id'),
       fileName: json['file_name'],
       trialType: json['item_type'],
       description: json['description'],
     );
   }
+}
+
+int _parseInt(dynamic value, String fieldName) {
+  if (value is int) return value;
+  if (value is num) return value.toInt();
+  if (value is String) {
+    final parsed = int.tryParse(value);
+    if (parsed != null) return parsed;
+  }
+  throw FormatException('Invalid value for $fieldName: $value');
 }

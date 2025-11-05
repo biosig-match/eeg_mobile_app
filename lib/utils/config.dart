@@ -30,8 +30,14 @@ class ServerConfig {
   final String protocol;
   final String ip;
   final int port;
+  final String defaultUserId;
 
-  ServerConfig({required this.protocol, required this.ip, required this.port});
+  ServerConfig({
+    required this.protocol,
+    required this.ip,
+    required this.port,
+    required this.defaultUserId,
+  });
 
   String get httpBaseUrl => '$protocol://$ip:$port';
 
@@ -65,10 +71,14 @@ class ServerConfig {
       throw FlutterError(
           "Invalid .env configuration:\n - ${errors.join("\n - ")}");
     }
+    final rawUserId = env['DEFAULT_USER_ID']?.trim();
+    final defaultUserId =
+        (rawUserId != null && rawUserId.isNotEmpty) ? rawUserId : 'user-default-01';
     return ServerConfig(
       protocol: protocol!.toLowerCase(),
       ip: ip!,
       port: port!,
+      defaultUserId: defaultUserId,
     );
   }
 }

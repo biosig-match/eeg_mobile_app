@@ -148,6 +148,53 @@ class SessionProvider with ChangeNotifier {
     notifyListeners();
   }
 
+  Future<bool> joinExperiment(String experimentId, {String? password}) async {
+    if (!_authProvider.isAuthenticated) return false;
+    final trimmedId = experimentId.trim();
+    if (trimmedId.isEmpty) {
+      _statusMessage = "参加する実験IDを入力してください。";
+      notifyListeners();
+      return false;
+    }
+
+    try {
+      final url = Uri.parse(
+          '${_config.httpBaseUrl}/api/v1/auth/experiments/$trimmedId/join');
+      final payload = <String, dynamic>{
+        "user_id": _authProvider.userId!,
+      };
+      final passwordValue = password?.trim() ?? '';
+      if (passwordValue.isNotEmpty) {
+        payload["password"] = passwordValue;
+      }
+
+      final response = await http.post(
+        url,
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode(payload),
+      );
+
+      if (response.statusCode == 201 || response.statusCode == 200) {
+        await fetchExperiments();
+        _statusMessage = "実験に参加しました。";
+        notifyListeners();
+        return true;
+      }
+
+      String reason = '実験への参加に失敗しました (${response.statusCode})';
+      if (response.statusCode == 401) {
+        reason = "パスワードが必要か不正です。";
+      } else if (response.statusCode == 404) {
+        reason = "指定した実験が見つかりません。";
+      }
+      _statusMessage = reason;
+    } catch (e) {
+      _statusMessage = "ネットワークエラー: $e";
+    }
+    notifyListeners();
+    return false;
+  }
+
   // --- セッション管理 ---
   Future<void> startSession({
     required SessionType type,
