@@ -64,18 +64,55 @@ class AnalysisProvider with ChangeNotifier {
           '${_config.httpBaseUrl}/api/v1/users/${_authProvider.userId}/analysis');
       final response = await http.get(url).timeout(const Duration(seconds: 5));
 
+      if (response.statusCode == 202) {
+        _analysisStatus = "解析結果を待機中...";
+        _latestAnalysis = null;
+        return;
+      }
+
       if (response.statusCode == 200) {
-        final results = jsonDecode(response.body);
-        _latestAnalysis = AnalysisResult(
-          psdImage: results['psd_image'] != null
-              ? base64Decode(results['psd_image'])
-              : null,
-          coherenceImage: results['coherence_image'] != null
-              ? base64Decode(results['coherence_image'])
-              : null,
-        );
-        _analysisStatus =
-            "解析結果を更新しました (${DateTime.now().hour}:${DateTime.now().minute.toString().padLeft(2, '0')})";
+        final payload = jsonDecode(response.body);
+        final apps = payload['applications'];
+
+        Map<String, dynamic>? selectedApp;
+        if (apps is Map<String, dynamic>) {
+          // 優先的にPSDアプリケーションを取得し、なければ最初のアプリを利用
+          final psdApp = apps['psd_coherence'];
+          if (psdApp is Map<String, dynamic>) {
+            selectedApp = psdApp;
+          } else if (apps.isNotEmpty) {
+            final firstEntry = apps.entries
+                .firstWhere(
+                  (entry) => entry.value is Map<String, dynamic>,
+                  orElse: () => MapEntry('', const {}),
+                )
+                .value;
+            if (firstEntry is Map<String, dynamic>) {
+              selectedApp = firstEntry;
+            }
+          }
+        }
+
+        if (selectedApp != null) {
+          Uint8List? decodeImage(String? value) {
+            if (value == null || value.trim().isEmpty) return null;
+            try {
+              return base64Decode(value);
+            } catch (_) {
+              return null;
+            }
+          }
+
+          _latestAnalysis = AnalysisResult(
+            psdImage: decodeImage(selectedApp['psd_image'] as String?),
+            coherenceImage: decodeImage(selectedApp['coherence_image'] as String?),
+          );
+          _analysisStatus =
+              "解析結果を更新しました (${DateTime.now().hour}:${DateTime.now().minute.toString().padLeft(2, '0')})";
+        } else {
+          _analysisStatus = "解析結果がまだ生成されていません";
+          _latestAnalysis = null;
+        }
       } else {
         _analysisStatus = "サーバーエラー: ${response.statusCode}";
         _latestAnalysis = null;

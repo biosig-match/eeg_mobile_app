@@ -23,9 +23,11 @@ class Session {
     required this.deviceId,
     required this.startTime,
     required this.type,
-    this.clockOffsetInfo, // ★★★ コンストラクタに追加 ★★★
+    Map<String, dynamic>? clockOffsetInfo,
     this.state = SessionState.running,
-  });
+  }) : clockOffsetInfo = (clockOffsetInfo == null || clockOffsetInfo.isEmpty)
+            ? null
+            : Map.unmodifiable(Map<String, dynamic>.from(clockOffsetInfo));
 
   void endSession() {
     endTime = DateTime.now().toUtc();
@@ -46,7 +48,7 @@ class Session {
       payload['experiment_id'] = experimentId;
     }
 
-    if (clockOffsetInfo != null) {
+    if (clockOffsetInfo != null && clockOffsetInfo!.isNotEmpty) {
       payload['clock_offset_info'] = clockOffsetInfo;
     }
 
