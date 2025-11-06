@@ -10,6 +10,7 @@ class BidsTask {
   final String? errorMessage;
   final DateTime createdAt;
   DateTime updatedAt;
+  final String? requestedByUserId;
 
   BidsTask({
     required this.experimentId,
@@ -21,6 +22,7 @@ class BidsTask {
     this.errorMessage,
     required this.createdAt,
     required this.updatedAt,
+    this.requestedByUserId,
   });
 
   factory BidsTask.fromStartJson(
@@ -33,6 +35,7 @@ class BidsTask {
       message: json['message'] ?? 'Task started',
       createdAt: DateTime.now(),
       updatedAt: DateTime.now(),
+      requestedByUserId: json['requested_by_user_id'] as String?,
     );
   }
 
@@ -48,8 +51,12 @@ class BidsTask {
       errorMessage: json['error_message'],
       createdAt: DateTime.tryParse(json['created_at'] ?? '') ?? DateTime.now(),
       updatedAt: DateTime.tryParse(json['updated_at'] ?? '') ?? DateTime.now(),
+      requestedByUserId: json['requested_by_user_id'] as String?,
     );
   }
+
+  bool get isTerminal =>
+      status == BidsTaskStatus.completed || status == BidsTaskStatus.failed;
 
   static BidsTaskStatus _statusFromString(String? status) {
     switch (status) {

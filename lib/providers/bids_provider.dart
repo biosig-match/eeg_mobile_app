@@ -22,6 +22,64 @@ class BidsProvider with ChangeNotifier {
 
   BidsProvider(this._config, this._authProvider);
 
+  Future<void> refreshTasks({bool silent = false}) async {
+    if (!_authProvider.isAuthenticated) return;
+    if (!silent) {
+      _statusMessage = 'エクスポートタスクを更新しています...';
+      notifyListeners();
+    }
+
+    try {
+      final url =
+          Uri.parse('${_config.httpBaseUrl}/api/v1/export-tasks?limit=50');
+      final response =
+          await http.get(url, headers: {'X-User-Id': _authProvider.userId!});
+
+      if (response.statusCode == 200) {
+        final List<dynamic> data = jsonDecode(response.body);
+        final Map<String, BidsTask> refreshed = {};
+        for (final raw in data) {
+          if (raw is! Map<String, dynamic>) continue;
+          final taskId = raw['task_id']?.toString();
+          final experimentId = raw['experiment_id']?.toString() ?? '';
+          if (taskId == null) continue;
+          final task = BidsTask.fromStatusJson(experimentId, taskId, raw);
+          refreshed[taskId] = task;
+        }
+
+        final removedTaskIds =
+            _tasks.keys.where((id) => !refreshed.containsKey(id)).toList();
+        for (final removedId in removedTaskIds) {
+          _cancelPolling(removedId);
+        }
+
+        _tasks
+          ..clear()
+          ..addAll(refreshed);
+
+        for (final task in _tasks.values) {
+          if (!task.isTerminal) {
+            _startPolling(task.taskId);
+          } else {
+            _cancelPolling(task.taskId);
+          }
+        }
+
+        if (!silent) {
+          _statusMessage =
+              _tasks.isEmpty ? 'エクスポートタスクはありません。' : 'タスク一覧を更新しました。';
+        }
+      } else {
+        throw Exception('タスク一覧の取得に失敗: ${response.statusCode}');
+      }
+    } catch (e) {
+      if (!silent) {
+        _statusMessage = 'エラー: $e';
+      }
+    }
+    notifyListeners();
+  }
+
   Future<void> startExport(String experimentId) async {
     if (!_authProvider.isAuthenticated) return;
     _statusMessage = 'BIDSエクスポートを開始しています...';
@@ -50,7 +108,13 @@ class BidsProvider with ChangeNotifier {
   }
 
   void _startPolling(String taskId) {
-    _pollingTimers[taskId]?.cancel();
+    final task = _tasks[taskId];
+    if (task == null || task.isTerminal) {
+      _cancelPolling(taskId);
+      return;
+    }
+
+    _cancelPolling(taskId);
     _pollingTimers[taskId] =
         Timer.periodic(const Duration(seconds: 5), (timer) async {
       final task = _tasks[taskId];
@@ -85,6 +149,11 @@ class BidsProvider with ChangeNotifier {
     });
   }
 
+  void _cancelPolling(String taskId) {
+    final timer = _pollingTimers.remove(taskId);
+    timer?.cancel();
+  }
+
   Future<void> downloadBidsFile(String taskId) async {
     final task = _tasks[taskId];
     if (task == null || task.status != BidsTaskStatus.completed) return;
@@ -92,10 +161,18 @@ class BidsProvider with ChangeNotifier {
     final url = Uri.parse(
         '${_config.httpBaseUrl}/api/v1/export-tasks/$taskId/download');
 
-    if (await canLaunchUrl(url)) {
-      await launchUrl(url, mode: LaunchMode.externalApplication);
-    } else {
-      _statusMessage = 'ダウンロードURLを開けませんでした: $url';
+    try {
+      final launched =
+          await launchUrl(url, mode: LaunchMode.externalApplication);
+      if (!launched) {
+        final fallback = await launchUrl(url, mode: LaunchMode.platformDefault);
+        if (!fallback) {
+          throw Exception('launchUrl returned false');
+        }
+      }
+    } catch (e) {
+      debugPrint('[BIDS] Failed to launch download URL: $e');
+      _statusMessage = 'ダウンロードURLを開けませんでした。別のブラウザをお試しください。（詳細: $e）';
       notifyListeners();
     }
   }
@@ -105,6 +182,7 @@ class BidsProvider with ChangeNotifier {
     for (var timer in _pollingTimers.values) {
       timer.cancel();
     }
+    _pollingTimers.clear();
     super.dispose();
   }
 }

@@ -7,6 +7,7 @@ import 'dart:math';
 import '../models/experiment.dart';
 import '../models/session.dart';
 import '../models/stimulus.dart';
+import '../providers/ble_provider.dart';
 import '../providers/session_provider.dart';
 import '../providers/stimulus_provider.dart';
 import 'session_summary_screen.dart';
@@ -153,6 +154,20 @@ class _StimulusPresentationScreenState
     _presentStimulus();
   }
 
+  int _triggerCodeForStimulus(BaseStimulus stimulus) {
+    final normalized = stimulus.trialType.toLowerCase();
+    if (normalized.contains('non') && normalized.contains('target')) {
+      return 2;
+    }
+    if (normalized.contains('target')) {
+      return 1;
+    }
+    if (normalized.contains('neutral')) {
+      return 3;
+    }
+    return 1;
+  }
+
   void _presentStimulus() {
     if (_currentIndex >= _presentationList.length) {
       _finishPresentation();
@@ -161,12 +176,13 @@ class _StimulusPresentationScreenState
 
     final currentStimulus = _presentationList[_currentIndex];
     final onsetSeconds = _sessionStopwatch.elapsedMilliseconds / 1000.0;
+    final triggerValue = _triggerCodeForStimulus(currentStimulus);
     final event = <String, dynamic>{
       'onset': onsetSeconds,
       'duration': _stimulusDisplayDuration.inMilliseconds / 1000.0,
       'trial_type': currentStimulus.trialType,
       'file_name': currentStimulus.fileName,
-      'trigger_state': 'white',
+      'value': triggerValue,
     };
     if (currentStimulus is Stimulus) {
       event['stimulus_id'] = currentStimulus.stimulusId;
@@ -174,6 +190,9 @@ class _StimulusPresentationScreenState
       event['calibration_item_id'] = currentStimulus.itemId;
     }
     _eventLog.add(event);
+
+    final bleProvider = context.read<BleProvider>();
+    unawaited(bleProvider.sendStimulusTrigger(triggerValue));
 
     _stimulusTimer?.cancel();
     setState(() {
@@ -201,13 +220,13 @@ class _StimulusPresentationScreenState
 
     final buffer = StringBuffer();
     buffer.writeln(
-        'onset,duration,trial_type,file_name,stimulus_id,calibration_item_id,trigger_state');
+        'onset,duration,trial_type,file_name,stimulus_id,calibration_item_id,value');
     for (var row in _eventLog) {
       final trialType = row['trial_type']?.toString() ?? '';
       final fileName = row['file_name']?.toString() ?? '';
-      final triggerState = row['trigger_state']?.toString() ?? '';
+      final triggerValue = row['value']?.toString() ?? '';
       buffer.writeln(
-          '${row['onset']},${row['duration']},"${_escapeCsv(trialType)}","${_escapeCsv(fileName)}",${row['stimulus_id'] ?? ''},${row['calibration_item_id'] ?? ''},"${_escapeCsv(triggerState)}"');
+          '${row['onset']},${row['duration']},"${_escapeCsv(trialType)}","${_escapeCsv(fileName)}",${row['stimulus_id'] ?? ''},${row['calibration_item_id'] ?? ''},"${_escapeCsv(triggerValue)}"');
     }
     final csvData = buffer.toString();
 
@@ -305,7 +324,7 @@ class _StimulusPresentationScreenState
             Center(child: centerWidget),
             Positioned(
               left: 24,
-              top: 24,
+              top: 48,
               child: _buildTriggerIndicator(),
             ),
           ],

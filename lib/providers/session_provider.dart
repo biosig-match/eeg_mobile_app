@@ -45,6 +45,11 @@ class SessionProvider with ChangeNotifier {
       if (response.statusCode == 200) {
         final List<dynamic> data = jsonDecode(utf8.decode(response.bodyBytes));
         _experiments = data.map((json) => Experiment.fromJson(json)).toList();
+        final hasSelected = _selectedExperimentId != null &&
+            _experiments.any((exp) => exp.id == _selectedExperimentId);
+        if (!hasSelected) {
+          _selectedExperimentId = null;
+        }
         if (_experiments.isEmpty) {
           _statusMessage = "参加中の実験がありません。フリーセッションを開始するか、新しい実験を作成してください";
         } else if (_selectedExperimentId == null) {
@@ -137,6 +142,11 @@ class SessionProvider with ChangeNotifier {
   }
 
   void selectExperiment(String experimentId) {
+    if (_selectedExperimentId == experimentId) {
+      _statusMessage = "'${selectedExperiment.name}' が既に選択されています";
+      notifyListeners();
+      return;
+    }
     _selectedExperimentId = experimentId;
     _statusMessage = "'${selectedExperiment.name}' が選択されました";
     notifyListeners();

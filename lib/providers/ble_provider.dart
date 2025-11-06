@@ -54,6 +54,7 @@ class BleProvider with ChangeNotifier implements BleProviderInterface {
 
   // --- デバイス設定 ---
   DeviceProfile? _deviceProfile;
+  static const int _cmdTriggerPulse = 0xC1;
 
   // --- Muse 2 関連 ---
   static const museControlCharUuid = "273E0001-4C4D-454D-96BE-F03BAC821358";
@@ -77,6 +78,9 @@ class BleProvider with ChangeNotifier implements BleProviderInterface {
   final List<SensorDataPoint> _serverUploadBuffer = [];
   static const int samplesPerPayload = 250;
   final List<(DateTime, double)> _valenceHistory = [];
+
+  int _pendingTriggerValue = 0;
+  int _pendingTriggerSamplesRemaining = 0;
 
   // --- UI更新 ---
   bool _needsUiUpdate = false;
@@ -382,6 +386,7 @@ class BleProvider with ChangeNotifier implements BleProviderInterface {
       final startIndex = byteData.getUint16(1, Endian.little);
       final numSamples = byteData.getUint8(3);
       final List<SensorDataPoint> newPoints = [];
+      bool appliedFallback = false;
 
       for (int i = 0; i < numSamples; i++) {
         final int sampleOffset = headerSize + (i * sampleDataSize);
@@ -391,8 +396,19 @@ class BleProvider with ChangeNotifier implements BleProviderInterface {
               byteData.getInt16(sampleOffset + (ch * 2), Endian.little);
         }
         const int triggerOffsetInSample = 16;
-        final int triggerState =
+        int triggerState =
             byteData.getUint8(sampleOffset + triggerOffsetInSample);
+
+        if (triggerState == 0) {
+          if (_pendingTriggerSamplesRemaining > 0) {
+            triggerState = _pendingTriggerValue & 0x0F;
+            _pendingTriggerSamplesRemaining--;
+            appliedFallback = true;
+          }
+        } else {
+          _pendingTriggerValue = triggerState & 0x0F;
+          _pendingTriggerSamplesRemaining = 5;
+        }
 
         newPoints.add(SensorDataPoint(
           sampleIndex: startIndex + i,
@@ -405,6 +421,10 @@ class BleProvider with ChangeNotifier implements BleProviderInterface {
       }
       if (newPoints.isNotEmpty) {
         _updateDataBuffer(newPoints);
+        if (appliedFallback) {
+          debugPrint(
+              '[BLE] Applied software trigger fallback for ${newPoints.length} samples (pending=$_pendingTriggerSamplesRemaining, value=$_pendingTriggerValue).');
+        }
       }
     }
   }
@@ -470,6 +490,22 @@ class BleProvider with ChangeNotifier implements BleProviderInterface {
     }
   }
 
+  Future<void> sendStimulusTrigger(int triggerValue) async {
+    if (_deviceType != DeviceType.customEeg) return;
+    final characteristic = _rxCharacteristic;
+    if (characteristic == null) return;
+    final clamped = triggerValue.clamp(0, 255);
+    final value = clamped is int ? clamped : clamped.toInt();
+    _pendingTriggerValue = value & 0x0F;
+    _pendingTriggerSamplesRemaining = 6;
+    try {
+      await characteristic
+          .write([_cmdTriggerPulse, value], withoutResponse: true);
+    } catch (e) {
+      debugPrint('[BLE] Failed to send trigger pulse: $e');
+    }
+  }
+
   /// ---------------------------------------------------------------------------
   /// [MODIFIED] This method is modified to align with the provided schema.
   /// ---------------------------------------------------------------------------
@@ -485,10 +521,10 @@ class BleProvider with ChangeNotifier implements BleProviderInterface {
     final eegConfigs = profile.electrodeConfigs;
 
     final bool includeTrigger = _deviceType == DeviceType.customEeg;
-    final int numEegChannels = eegConfigs.length;
-    final int numTotalChannels = numEegChannels + (includeTrigger ? 1 : 0);
+    final int numChannels = eegConfigs.length;
+    const int triggerSectionBytes = 4;
 
-    builder.add([0x04, numTotalChannels, 0x00, 0x00]);
+    builder.add([0x04, numChannels, includeTrigger ? 0x01 : 0x00, 0x00]);
 
     for (final config in eegConfigs) {
       final nameBytes = utf8.encode(config.name);
@@ -497,29 +533,22 @@ class BleProvider with ChangeNotifier implements BleProviderInterface {
       builder.add([config.type, 0x00]); // type, reserved
     }
 
-    if (includeTrigger) {
-      final trigNameBytes = utf8.encode("TRIG");
-      final trigPaddedName = Uint8List(8)
-        ..setRange(0, trigNameBytes.length, trigNameBytes);
-      builder.add(trigPaddedName);
-      builder.add([3, 0x00]); // type=3 (TRIG), reserved
-    }
-
     for (final sample in samplesToSend) {
-      final signalsBytes = ByteData(numTotalChannels * 2);
-      for (int i = 0; i < numEegChannels; i++) {
+      final signalsBytes = ByteData(numChannels * 2);
+      for (int i = 0; i < numChannels; i++) {
         signalsBytes.setInt16(i * 2, sample.eegValues[i], Endian.little);
       }
-      if (includeTrigger) {
-        signalsBytes.setInt16(
-            numEegChannels * 2, sample.triggerState, Endian.little);
-      }
       builder.add(signalsBytes.buffer.asUint8List());
+      if (includeTrigger) {
+        final triggerBytes = Uint8List(triggerSectionBytes);
+        triggerBytes[0] = sample.triggerState & 0x0F;
+        builder.add(triggerBytes);
+      }
 
       builder.add(Uint8List(12));
 
-      final impedanceBytes = Uint8List(numTotalChannels)
-        ..fillRange(0, numTotalChannels, 255);
+      final impedanceBytes = Uint8List(numChannels)
+        ..fillRange(0, numChannels, 255);
       builder.add(impedanceBytes);
     }
 
@@ -565,11 +594,8 @@ class BleProvider with ChangeNotifier implements BleProviderInterface {
     );
   }
 
-  Future<void> _sendPayloadToServer(
-      Uint8List compressedPacket,
-      DeviceProfile profile,
-      DateTime startTime,
-      DateTime endTime) async {
+  Future<void> _sendPayloadToServer(Uint8List compressedPacket,
+      DeviceProfile profile, DateTime startTime, DateTime endTime) async {
     if (!_authProvider.isAuthenticated || _targetDevice == null) return;
 
     final body = jsonEncode({
@@ -697,6 +723,8 @@ class BleProvider with ChangeNotifier implements BleProviderInterface {
     _customEegReceiveBuffer.clear();
     _museEegBuffer.forEach((b) => b.clear());
     _museLastPacketIndex = -1;
+    _pendingTriggerValue = 0;
+    _pendingTriggerSamplesRemaining = 0;
     _deviceProfile = null;
     _updateStatus("未接続");
     notifyListeners();
@@ -707,4 +735,3 @@ class BleProvider with ChangeNotifier implements BleProviderInterface {
     notifyListeners();
   }
 }
-

@@ -82,8 +82,7 @@ class _HomeScreenState extends State<HomeScreen> {
               child: const Text("外部アプリで刺激を提示 (PsychoPyなど)"),
               onPressed: () {
                 Navigator.of(ctx).pop();
-                _startExternalSession(
-                    sessionProvider, connectedDeviceId, {});
+                _startExternalSession(sessionProvider, connectedDeviceId, {});
               },
             ),
           ],
@@ -135,7 +134,8 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
           if (!canRunMainTask)
             const Padding(
-              padding: EdgeInsets.only(top: 8.0, right: 8.0, left: 8.0, bottom: 4.0),
+              padding:
+                  EdgeInsets.only(top: 8.0, right: 8.0, left: 8.0, bottom: 4.0),
               child: Text(
                 "※本計測を実行するには実験を選択してください。",
                 textAlign: TextAlign.center,
@@ -160,7 +160,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final bleProvider = context.watch<BleProvider>();
     final sessionProvider = context.watch<SessionProvider>();
     final theme = Theme.of(context);
-    
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('EEG BIDS Collector'),
@@ -170,10 +170,10 @@ class _HomeScreenState extends State<HomeScreen> {
             icon: const Icon(Icons.devices_other),
             onSelected: (deviceType) {
               if (bleProvider.isConnected) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text("まず現在のデバイスとの接続を解除してください。")),
-                  );
-                  return;
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text("まず現在のデバイスとの接続を解除してください。")),
+                );
+                return;
               }
               bleProvider.startScan(targetDeviceType: deviceType);
             },
@@ -191,7 +191,9 @@ class _HomeScreenState extends State<HomeScreen> {
           Padding(
             padding: const EdgeInsets.only(right: 8.0),
             child: Icon(
-              bleProvider.isConnected ? Icons.bluetooth_connected : Icons.bluetooth_disabled,
+              bleProvider.isConnected
+                  ? Icons.bluetooth_connected
+                  : Icons.bluetooth_disabled,
               color: bleProvider.isConnected ? Colors.cyanAccent : Colors.grey,
             ),
           )
@@ -204,66 +206,82 @@ class _HomeScreenState extends State<HomeScreen> {
             padding: const EdgeInsets.all(8.0),
             child: Column(
               children: [
-            Card(
-              child: ListTile(
-                leading: const Icon(Icons.science_outlined),
-                title: Text(sessionProvider.selectedExperiment.name),
-                subtitle: Text(sessionProvider.statusMessage,
-                    style: TextStyle(color: theme.colorScheme.primary)),
-                trailing: TextButton(
-                  child: const Text("変更"),
-                  onPressed: () {
-                    Navigator.of(context).push(MaterialPageRoute(
-                        builder: (_) => const ExperimentsScreen()));
-                  },
-                ),
-              ),
-            ),
-            const SizedBox(height: 8),
-            Consumer<MediaProvider>(
-              builder: (context, mediaProvider, _) => Card(
-                child: Column(
-                  children: [
-                    SwitchListTile(
-                      title: const Text("10秒ごとの音声録音とアップロード"),
-                      subtitle: const Text("セッション中に10秒間の音声を継続的に送信します"),
-                      value: mediaProvider.enableAudioCapture,
-                      onChanged: (value) {
-                        mediaProvider.setEnableAudioCapture(value);
-                      },
+                Card(
+                  child: ListTile(
+                    leading: const Icon(Icons.science_outlined),
+                    title: Text(sessionProvider.selectedExperiment.name),
+                    subtitle: Text(sessionProvider.statusMessage,
+                        style: TextStyle(color: theme.colorScheme.primary)),
+                    trailing: Wrap(
+                      spacing: 8,
+                      children: [
+                        if (sessionProvider.isExperimentSelected)
+                          TextButton(
+                            onPressed: () {
+                              sessionProvider.deselectExperiment();
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(content: Text('実験選択を解除しました。')),
+                              );
+                            },
+                            child: const Text('解除'),
+                          ),
+                        TextButton(
+                          child: const Text("変更"),
+                          onPressed: () {
+                            Navigator.of(context).push(MaterialPageRoute(
+                                builder: (_) => const ExperimentsScreen()));
+                          },
+                        ),
+                      ],
                     ),
-                    SwitchListTile(
-                      title: const Text("5秒時点の写真撮影とアップロード"),
-                      subtitle: mediaProvider.cameraReady
-                          ? const Text("セッションごとに撮影される画像の送信を切り替えます")
-                          : const Text(
-                              "カメラが利用できないため画像は送信されません",
-                              style: TextStyle(color: Colors.orangeAccent),
-                            ),
-                      value: mediaProvider.enableImageCapture && mediaProvider.cameraReady,
-                      onChanged: mediaProvider.cameraReady
-                          ? (value) {
-                              mediaProvider.setEnableImageCapture(value);
-                            }
-                          : null,
-                    ),
-                  ],
+                  ),
                 ),
-              ),
-            ),
-            const SizedBox(height: 8),
-            Expanded(
-              flex: 3,
-              child: EegMultiChannelChart(
-                data: bleProvider.displayData,
-                channelCount: bleProvider.channelCount,
-                sampleRate: BleProvider.sampleRate,
-              ),
-            ),
-            const SizedBox(height: 16),
-            _buildActionButton(context, bleProvider, sessionProvider),
-            const SizedBox(height: 8),
-          ],
+                const SizedBox(height: 8),
+                Consumer<MediaProvider>(
+                  builder: (context, mediaProvider, _) => Card(
+                    child: Column(
+                      children: [
+                        SwitchListTile(
+                          title: const Text("10秒ごとの音声録音とアップロード"),
+                          subtitle: const Text("セッション中に10秒間の音声を継続的に送信します"),
+                          value: mediaProvider.enableAudioCapture,
+                          onChanged: (value) {
+                            mediaProvider.setEnableAudioCapture(value);
+                          },
+                        ),
+                        SwitchListTile(
+                          title: const Text("5秒時点の写真撮影とアップロード"),
+                          subtitle: mediaProvider.cameraReady
+                              ? const Text("セッションごとに撮影される画像の送信を切り替えます")
+                              : const Text(
+                                  "カメラが利用できないため画像は送信されません",
+                                  style: TextStyle(color: Colors.orangeAccent),
+                                ),
+                          value: mediaProvider.enableImageCapture &&
+                              mediaProvider.cameraReady,
+                          onChanged: mediaProvider.cameraReady
+                              ? (value) {
+                                  mediaProvider.setEnableImageCapture(value);
+                                }
+                              : null,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Expanded(
+                  flex: 3,
+                  child: EegMultiChannelChart(
+                    data: bleProvider.displayData,
+                    channelCount: bleProvider.channelCount,
+                    sampleRate: BleProvider.sampleRate,
+                  ),
+                ),
+                const SizedBox(height: 16),
+                _buildActionButton(context, bleProvider, sessionProvider),
+                const SizedBox(height: 8),
+              ],
             ),
           ),
           // 画面下にオーバーレイする快不快パネル（通常は非表示，^で表示）
@@ -280,7 +298,6 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Widget _buildActionButton(
       BuildContext context, BleProvider ble, SessionProvider session) {
-    
     if (!ble.isConnected) {
       return FloatingActionButton.extended(
         onPressed: () => ble.startScan(),
@@ -323,4 +340,3 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 }
-
