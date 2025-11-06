@@ -364,7 +364,26 @@ class _QualityBadge extends StatelessWidget {
     }
     if (lower.startsWith('impedance unknown')) {
       final suffix = reason.substring('impedance unknown'.length).trim();
+      if (suffix == '100%' || suffix == '100％') {
+        return 'インピーダンス情報が取得されていません';
+      }
       return 'インピーダンス不明 ${suffix.isNotEmpty ? suffix : ''}'.trim();
+    }
+    if (lower.startsWith('rms-low')) {
+      final suffix = reason.substring('rms-low'.length).trim();
+      return '信号振幅が低すぎます ${suffix.isNotEmpty ? suffix : ''}'.trim();
+    }
+    if (lower.startsWith('rms-high')) {
+      final suffix = reason.substring('rms-high'.length).trim();
+      return '信号振幅が高すぎます ${suffix.isNotEmpty ? suffix : ''}'.trim();
+    }
+    if (lower.startsWith('line-noise')) {
+      final suffix = reason.substring('line-noise'.length).trim();
+      return '電源ノイズ比が高い ${suffix.isNotEmpty ? suffix : ''}'.trim();
+    }
+    if (lower.startsWith('low-frequency-drift')) {
+      final suffix = reason.substring('low-frequency-drift'.length).trim();
+      return '低周波ドリフトが大きい ${suffix.isNotEmpty ? suffix : ''}'.trim();
     }
     if (lower.startsWith('zero-fill')) {
       final suffix = reason.substring('zero-fill'.length).trim();
@@ -387,11 +406,18 @@ class _QualityBadge extends StatelessWidget {
           .map(_translateReason)
           .where((value) => value.isNotEmpty)
           .toList();
-      if (status!.status == 'bad') {
+      final normalizedStatus = status!.status;
+      if (normalizedStatus == 'bad') {
         label = '要調整';
         color = Colors.redAccent;
         reasons =
             translatedReasons.isNotEmpty ? translatedReasons : ['信号品質が低下しています'];
+      } else if (normalizedStatus == 'unknown') {
+        label = '不明';
+        color = Colors.blueGrey;
+        reasons = translatedReasons.isNotEmpty
+            ? translatedReasons
+            : ['インピーダンス情報が取得されていません'];
       } else if (status!.hasWarning || translatedReasons.isNotEmpty) {
         label = '注意';
         color = Colors.amberAccent;

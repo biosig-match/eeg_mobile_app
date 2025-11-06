@@ -205,6 +205,49 @@ class SessionProvider with ChangeNotifier {
     return false;
   }
 
+  Future<bool> deleteExperiment(String experimentId) async {
+    if (!_authProvider.isAuthenticated) return false;
+
+    final experiment = _experiments.firstWhere(
+      (exp) => exp.id == experimentId,
+      orElse: () => Experiment.empty(),
+    );
+    final experimentName = experiment.id.isEmpty ? '選択中の実験' : experiment.name;
+    final wasSelected = _selectedExperimentId == experimentId;
+
+    _statusMessage = "実験を削除中...";
+    notifyListeners();
+
+    try {
+      final url =
+          Uri.parse('${_config.httpBaseUrl}/api/v1/experiments/$experimentId');
+      final response = await http.delete(
+        url,
+        headers: {'X-User-Id': _authProvider.userId!},
+      );
+
+      if (response.statusCode == 200 ||
+          response.statusCode == 202 ||
+          response.statusCode == 204) {
+        if (wasSelected) {
+          _selectedExperimentId = null;
+        }
+
+        await fetchExperiments();
+        _statusMessage = "'${experimentName}' を削除しました";
+        notifyListeners();
+        return true;
+      }
+
+      _statusMessage = "実験の削除に失敗しました (${response.statusCode})";
+    } catch (e) {
+      _statusMessage = "エラー: $e";
+    }
+
+    notifyListeners();
+    return false;
+  }
+
   // --- セッション管理 ---
   Future<void> startSession({
     required SessionType type,

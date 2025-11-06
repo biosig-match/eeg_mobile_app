@@ -163,6 +163,48 @@ class _ExperimentTile extends StatelessWidget {
   final bool isSelected;
   final ThemeData theme;
 
+  Future<void> _confirmDelete(BuildContext context) async {
+    final shouldDelete = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('実験を削除'),
+        content: Text(
+          "'${experiment.name}' を完全に削除します。\nこの操作は取り消せません。",
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('キャンセル'),
+          ),
+          FilledButton.icon(
+            icon: const Icon(Icons.delete_outline),
+            label: const Text('削除する'),
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(dialogContext).colorScheme.error,
+              foregroundColor: Theme.of(dialogContext).colorScheme.onError,
+            ),
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+          ),
+        ],
+      ),
+    );
+
+    if (shouldDelete == true && context.mounted) {
+      final sessionProvider = context.read<SessionProvider>();
+      final success = await sessionProvider.deleteExperiment(experiment.id);
+      if (!context.mounted) return;
+      if (success) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("'${experiment.name}' を削除しました。")),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(sessionProvider.statusMessage)),
+        );
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Card(
@@ -177,38 +219,50 @@ class _ExperimentTile extends StatelessWidget {
           maxLines: 2,
           overflow: TextOverflow.ellipsis,
         ),
-        trailing: IconButton(
-          icon: const Icon(Icons.archive_outlined),
-          tooltip: 'BIDS形式でエクスポート',
-          onPressed: () {
-            showDialog(
-              context: context,
-              builder: (dCtx) => AlertDialog(
-                title: const Text('BIDSエクスポート'),
-                content: Text(
-                  "'${experiment.name}' のデータをエクスポートしますか？\n(処理には時間がかかる場合があります)",
-                ),
-                actions: [
-                  TextButton(
-                    child: const Text('キャンセル'),
-                    onPressed: () => Navigator.of(dCtx).pop(),
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            IconButton(
+              icon: const Icon(Icons.archive_outlined),
+              tooltip: 'BIDS形式でエクスポート',
+              onPressed: () {
+                showDialog(
+                  context: context,
+                  builder: (dCtx) => AlertDialog(
+                    title: const Text('BIDSエクスポート'),
+                    content: Text(
+                      "'${experiment.name}' のデータをエクスポートしますか？\n(処理には時間がかかる場合があります)",
+                    ),
+                    actions: [
+                      TextButton(
+                        child: const Text('キャンセル'),
+                        onPressed: () => Navigator.of(dCtx).pop(),
+                      ),
+                      FilledButton(
+                        child: const Text('開始'),
+                        onPressed: () {
+                          context
+                              .read<BidsProvider>()
+                              .startExport(experiment.id);
+                          Navigator.of(dCtx).pop();
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text('BIDSエクスポートを開始しました。'),
+                            ),
+                          );
+                        },
+                      ),
+                    ],
                   ),
-                  FilledButton(
-                    child: const Text('開始'),
-                    onPressed: () {
-                      context.read<BidsProvider>().startExport(experiment.id);
-                      Navigator.of(dCtx).pop();
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text('BIDSエクスポートを開始しました。'),
-                        ),
-                      );
-                    },
-                  ),
-                ],
-              ),
-            );
-          },
+                );
+              },
+            ),
+            IconButton(
+              icon: const Icon(Icons.delete_outline),
+              tooltip: '実験を削除',
+              onPressed: () => _confirmDelete(context),
+            ),
+          ],
         ),
         onTap: () {
           context.read<SessionProvider>().selectExperiment(experiment.id);
