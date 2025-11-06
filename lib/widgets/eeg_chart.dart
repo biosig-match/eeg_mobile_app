@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'dart:math';
 import '../models/sensor_data.dart';
 import '../providers/ble_provider.dart';
+import '../providers/analysis_provider.dart';
 import 'package:provider/provider.dart';
 
 /// 複数チャンネルのEEGを縦に並べて表示する。
@@ -17,12 +18,16 @@ class EegMultiChannelChart extends StatefulWidget {
 
   /// データのサンプリングレート (Hz)
   final int sampleRate;
+  final List<ElectrodeConfig>? electrodes;
+  final Map<String, ChannelQualityStatus>? channelQuality;
 
   const EegMultiChannelChart({
     super.key,
     required this.data,
     this.channelCount = 8,
     required this.sampleRate,
+    this.electrodes,
+    this.channelQuality,
   });
   @override
   State<EegMultiChannelChart> createState() => _EegMultiChannelChartState();
@@ -74,6 +79,15 @@ class _EegMultiChannelChartState extends State<EegMultiChannelChart> {
     });
   }
 
+  ChannelQualityStatus? _qualityForChannel(String channelName) {
+    final qualityMap = widget.channelQuality;
+    if (qualityMap == null || qualityMap.isEmpty) return null;
+    final upper = channelName.toUpperCase();
+    return qualityMap[upper] ??
+        qualityMap[channelName] ??
+        qualityMap[channelName.toLowerCase()];
+  }
+
   @override
   Widget build(BuildContext context) {
     // データが空の場合は待機メッセージを表示
@@ -111,10 +125,15 @@ class _EegMultiChannelChartState extends State<EegMultiChannelChart> {
           child: ListView.builder(
             itemCount: widget.channelCount,
             itemBuilder: (context, index) {
+              final electrodeName = widget.electrodes != null &&
+                      index < (widget.electrodes?.length ?? 0)
+                  ? widget.electrodes![index].name
+                  : 'CH${index + 1}';
+              final quality = _qualityForChannel(electrodeName);
               return Padding(
                 padding: const EdgeInsets.only(bottom: 4.0),
                 child: SizedBox(
-                  height: 160,
+                  height: 180,
                   child: _SingleChannelChart(
                     data: widget.data,
                     sampleRate: widget.sampleRate,
@@ -122,6 +141,8 @@ class _EegMultiChannelChartState extends State<EegMultiChannelChart> {
                     yMinLocked: _lockedRanges[index]?.$1,
                     yMaxLocked: _lockedRanges[index]?.$2,
                     showBottomTitles: true,
+                    channelName: electrodeName,
+                    quality: quality,
                   ),
                 ),
               );
@@ -141,6 +162,8 @@ class _SingleChannelChart extends StatelessWidget {
   final bool showBottomTitles;
   final double? yMinLocked;
   final double? yMaxLocked;
+  final String channelName;
+  final ChannelQualityStatus? quality;
 
   const _SingleChannelChart({
     required this.data,
@@ -149,6 +172,8 @@ class _SingleChannelChart extends StatelessWidget {
     required this.yMinLocked,
     required this.yMaxLocked,
     required this.showBottomTitles,
+    required this.channelName,
+    required this.quality,
   });
 
   @override
@@ -164,13 +189,8 @@ class _SingleChannelChart extends StatelessWidget {
     final double yMin = yMinLocked ?? defaultYMin;
     final double yMax = yMaxLocked ?? defaultYMax;
 
-    return Container(
-      padding: const EdgeInsets.only(top: 16, right: 16, bottom: 8),
-      child: LineChart(
-        LineChartData(
+    LineChartData _chartData() => LineChartData(
           backgroundColor: const Color(0xff232d37),
-
-          // === データプロット定義 ===
           lineBarsData: [
             LineChartBarData(
               spots: data
@@ -179,21 +199,14 @@ class _SingleChannelChart extends StatelessWidget {
                   .map((entry) {
                     final index = entry.key;
                     final point = entry.value;
-
                     if (lsbToMicrovolts == null ||
                         channelIndex >= point.eegValues.length) {
                       return FlSpot.nullSpot;
                     }
-
-                    // 常に生のADC値からµVに変換してプロット
                     final y = point.eegValues[channelIndex].toDouble() *
                         lsbToMicrovolts;
                     final double yClamped = y.clamp(yMin, yMax);
-
-                    return FlSpot(
-                      index.toDouble(), // X座標はデータのインデックス
-                      yClamped,
-                    );
+                    return FlSpot(index.toDouble(), yClamped);
                   })
                   .where((spot) => spot != FlSpot.nullSpot)
                   .toList(),
@@ -201,20 +214,16 @@ class _SingleChannelChart extends StatelessWidget {
               color: Colors.cyanAccent,
               barWidth: 1.2,
               dotData: const FlDotData(show: false),
-            )
+            ),
           ],
-
-          // === 軸範囲 ===
           minX: 0,
-          maxX: (data.length - 1).toDouble(),
+          maxX: max(0, (data.length - 1).toDouble()),
           minY: yMin,
           maxY: yMax,
-
-          // === グリッド線 ===
           gridData: FlGridData(
             show: true,
             drawVerticalLine: true,
-            verticalInterval: sampleRate.toDouble(), // 1秒ごとに縦線
+            verticalInterval: sampleRate.toDouble(),
             drawHorizontalLine: true,
             getDrawingHorizontalLine: (value) {
               if (value == 0) {
@@ -233,8 +242,6 @@ class _SingleChannelChart extends StatelessWidget {
               strokeWidth: 0.5,
             ),
           ),
-
-          // === 軸タイトルと目盛り ===
           titlesData: FlTitlesData(
             topTitles:
                 const AxisTitles(sideTitles: SideTitles(showTitles: false)),
@@ -245,23 +252,22 @@ class _SingleChannelChart extends StatelessWidget {
                 interval: sampleRate.toDouble(),
                 getTitlesWidget: (value, meta) {
                   final index = value.toInt();
-                  if (index < 0 || index >= data.length) {
+                  if (index < 0 || index >= data.length || index >= meta.max) {
                     return const SizedBox.shrink();
                   }
                   final time = data[index].timestamp;
                   final formattedTime =
                       '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}:${time.second.toString().padLeft(2, '0')}';
-                  if (index >= meta.max) return const SizedBox.shrink();
-
                   return SideTitleWidget(
                     axisSide: meta.axisSide,
                     space: 4.0,
                     child: Text(
                       formattedTime,
                       style: TextStyle(
-                          color: Colors.grey[400],
-                          fontSize: 9.0,
-                          overflow: TextOverflow.ellipsis),
+                        color: Colors.grey[400],
+                        fontSize: 9.0,
+                        overflow: TextOverflow.ellipsis,
+                      ),
                     ),
                   );
                 },
@@ -276,9 +282,11 @@ class _SingleChannelChart extends StatelessWidget {
                     return SideTitleWidget(
                       axisSide: meta.axisSide,
                       space: 4.0,
-                      child: Text('Ch${channelIndex + 1}',
-                          style: TextStyle(
-                              color: Colors.grey[400], fontSize: 10.0)),
+                      child: Text(
+                        channelName,
+                        style:
+                            TextStyle(color: Colors.grey[400], fontSize: 10.0),
+                      ),
                     );
                   }
                   return const SizedBox.shrink();
@@ -289,7 +297,7 @@ class _SingleChannelChart extends StatelessWidget {
               sideTitles: SideTitles(
                 showTitles: true,
                 reservedSize: 50.0,
-                interval: (yMax - yMin).abs(),
+                interval: max(1, (yMax - yMin).abs()),
                 getTitlesWidget: (value, meta) {
                   if (value == 0) {
                     return const SizedBox.shrink();
@@ -297,22 +305,122 @@ class _SingleChannelChart extends StatelessWidget {
                   return SideTitleWidget(
                     axisSide: meta.axisSide,
                     space: 4.0,
-                    child: Text('${value.toStringAsFixed(0)} µV',
-                        style:
-                            TextStyle(color: Colors.grey[400], fontSize: 10.0)),
+                    child: Text(
+                      '${value.toStringAsFixed(0)} µV',
+                      style: TextStyle(color: Colors.grey[400], fontSize: 10.0),
+                    ),
                   );
                 },
               ),
             ),
           ),
-
           borderData: FlBorderData(
             show: true,
             border: Border.all(color: Colors.white24),
           ),
           lineTouchData: const LineTouchData(enabled: false),
+        );
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8.0),
+          child: Row(
+            children: [
+              Text(
+                channelName,
+                style: const TextStyle(fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(width: 8),
+              _QualityBadge(status: quality),
+            ],
+          ),
         ),
-        duration: Duration.zero,
+        const SizedBox(height: 4),
+        Expanded(
+          child: Container(
+            padding: const EdgeInsets.only(top: 16, right: 16, bottom: 8),
+            child: LineChart(
+              _chartData(),
+              duration: Duration.zero,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _QualityBadge extends StatelessWidget {
+  final ChannelQualityStatus? status;
+  const _QualityBadge({required this.status});
+
+  String _translateReason(String reason) {
+    final lower = reason.toLowerCase();
+    if (lower.startsWith('impedance high')) {
+      final suffix = reason.substring('impedance high'.length).trim();
+      return 'インピーダンス高 ${suffix.isNotEmpty ? suffix : ''}'.trim();
+    }
+    if (lower.startsWith('impedance unknown')) {
+      final suffix = reason.substring('impedance unknown'.length).trim();
+      return 'インピーダンス不明 ${suffix.isNotEmpty ? suffix : ''}'.trim();
+    }
+    if (lower.startsWith('zero-fill')) {
+      final suffix = reason.substring('zero-fill'.length).trim();
+      return 'ゼロ値が継続 ${suffix.isNotEmpty ? suffix : ''}'.trim();
+    }
+    if (lower.contains('flatline')) {
+      return '振幅がフラット';
+    }
+    return reason;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    String label = '未取得';
+    Color color = Colors.blueGrey;
+    List<String> reasons = const ['リアルタイム解析の結果を待機しています'];
+
+    if (status != null) {
+      final translatedReasons = status!.reasons
+          .map(_translateReason)
+          .where((value) => value.isNotEmpty)
+          .toList();
+      if (status!.status == 'bad') {
+        label = '要調整';
+        color = Colors.redAccent;
+        reasons =
+            translatedReasons.isNotEmpty ? translatedReasons : ['信号品質が低下しています'];
+      } else if (status!.hasWarning || translatedReasons.isNotEmpty) {
+        label = '注意';
+        color = Colors.amberAccent;
+        reasons = translatedReasons;
+      } else {
+        label = '良好';
+        color = Colors.lightGreenAccent;
+        reasons = const ['信号は安定しています'];
+      }
+    }
+
+    return Tooltip(
+      message: reasons.join('\n'),
+      waitDuration: const Duration(milliseconds: 400),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+        decoration: BoxDecoration(
+          color: color.withOpacity(0.18),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: color.withOpacity(0.6)),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: color,
+            fontWeight: FontWeight.w600,
+            fontSize: 12,
+          ),
+        ),
       ),
     );
   }

@@ -1,8 +1,10 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import '../models/session.dart';
+import '../providers/analysis_provider.dart';
 import '../providers/ble_provider.dart';
 import '../providers/media_provider.dart';
 import '../providers/session_provider.dart';
@@ -21,11 +23,14 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
+  Timer? _analysisTimer;
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _initializePermissionsAndMedia();
+      _startAnalysisPolling();
     });
   }
 
@@ -39,6 +44,24 @@ class _HomeScreenState extends State<HomeScreen> {
     ].request();
     if (!mounted) return;
     await context.read<MediaProvider>().initialize();
+  }
+
+  void _startAnalysisPolling() {
+    _analysisTimer?.cancel();
+    final analysisProvider = context.read<AnalysisProvider>();
+    analysisProvider.fetchLatestResults();
+    _analysisTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      if (!mounted) return;
+      final ble = context.read<BleProvider>();
+      if (!ble.isConnected) return;
+      analysisProvider.fetchLatestResults();
+    });
+  }
+
+  @override
+  void dispose() {
+    _analysisTimer?.cancel();
+    super.dispose();
   }
 
   void _showSessionTypeDialog() {
@@ -159,6 +182,7 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget build(BuildContext context) {
     final bleProvider = context.watch<BleProvider>();
     final sessionProvider = context.watch<SessionProvider>();
+    final analysisProvider = context.watch<AnalysisProvider>();
     final theme = Theme.of(context);
 
     return Scaffold(
@@ -276,6 +300,8 @@ class _HomeScreenState extends State<HomeScreen> {
                     data: bleProvider.displayData,
                     channelCount: bleProvider.channelCount,
                     sampleRate: BleProvider.sampleRate,
+                    electrodes: bleProvider.deviceProfile?.electrodeConfigs,
+                    channelQuality: analysisProvider.latestChannelQuality,
                   ),
                 ),
                 const SizedBox(height: 16),
